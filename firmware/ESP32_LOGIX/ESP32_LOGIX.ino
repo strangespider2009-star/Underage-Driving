@@ -1,11 +1,10 @@
 /*
   UNDERAGE-DRIVING / LOGIX — ESP32-WROOM-32 firmware
-  Camera face check happens in the browser; real R307 fingerprint check here.
+  Face matching and phone passkey verification happen in the browser/server.
   The 7408 AND gate is physically driven on GPIO25/26 and its output is read on GPIO27.
   Indicators operate for 10 seconds. This is a standalone low-voltage LED demo ONLY.
 
   Dependencies (Arduino IDE Library Manager):
-    Adafruit Fingerprint Sensor Library
     ArduinoJson v7
   Board package: esp32 by Espressif Systems
 
@@ -21,12 +20,9 @@
 #include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <Adafruit_Fingerprint.h>
 #include "config.h"
 #include "trust_roots.h"
 
-static const uint8_t FINGER_RX_PIN = 16;   // R307 TX
-static const uint8_t FINGER_TX_PIN = 17;   // R307 RX
 static const uint8_t AND_INPUT_A = 25;    // 7408 pin 1
 static const uint8_t AND_INPUT_B = 26;    // 7408 pin 2
 static const uint8_t AND_SENSE_PIN = 27;  // inverted/safe interface from 7408 pin 3
@@ -35,15 +31,9 @@ static const uint8_t RED_LED = 19;
 static const uint8_t BUZZER_TRANSISTOR = 23;
 
 static const uint32_t RESULT_WINDOW_MS = 10000;
-static const uint32_t SCAN_TIMEOUT_MS = 16000;
 static const uint32_t POLL_INTERVAL_MS = 1700;
-static const uint32_t SENSOR_RETRY_INTERVAL_MS = 15000;
 
-HardwareSerial sensorUart(2);
-Adafruit_Fingerprint finger(&sensorUart);
-bool sensorReady = false;
 uint32_t nextPoll = 0;
-uint32_t nextSensorRetry = 0;
 bool ntpStarted = false;
 bool clockReady = false;
 
@@ -132,50 +122,6 @@ void indicatorTimerTask(void *unused) {
   }
 }
 
-bool waitForFinger(bool present, uint32_t timeoutMs) {
-  const uint32_t started = millis();
-  while ((uint32_t)(millis() - started) < timeoutMs) {
-    uint8_t state = finger.getImage();
-    if (present && state == FINGERPRINT_OK) return true;
-    if (!present && state == FINGERPRINT_NOFINGER) return true;
-    delay(85);
-  }
-  return false;
-}
-
-bool enroll(uint8_t slot, String &reason) {
-  if (!sensorReady) { reason = "SENSOR_OFFLINE"; return false; }
-  Serial.printf("ENROLL slot %u: place finger\n", slot);
-  if (!waitForFinger(true, SCAN_TIMEOUT_MS) || finger.image2Tz(1) != FINGERPRINT_OK) {
-    reason = "FIRST_SCAN_FAILED"; return false;
-  }
-  Serial.println("Remove finger now");
-  if (!waitForFinger(false, SCAN_TIMEOUT_MS)) { reason = "REMOVE_TIMEOUT"; return false; }
-  Serial.println("Place SAME finger again");
-  if (!waitForFinger(true, SCAN_TIMEOUT_MS) || finger.image2Tz(2) != FINGERPRINT_OK) {
-    reason = "SECOND_SCAN_FAILED"; return false;
-  }
-  if (finger.createModel() != FINGERPRINT_OK) { reason = "FINGER_MISMATCH"; return false; }
-  if (finger.storeModel(slot) != FINGERPRINT_OK) { reason = "STORE_FAILED"; return false; }
-  return true;
-}
-
-bool verify(uint8_t slot, String &reason) {
-  if (!sensorReady) { reason = "SENSOR_OFFLINE"; return false; }
-  Serial.printf("VERIFY expected slot %u: place finger\n", slot);
-  if (!waitForFinger(true, SCAN_TIMEOUT_MS)) { reason = "SCAN_TIMEOUT"; return false; }
-  if (finger.image2Tz(1) != FINGERPRINT_OK) { reason = "BAD_SCAN"; return false; }
-  if (finger.fingerFastSearch() != FINGERPRINT_OK) { reason = "UNKNOWN_FINGER"; return false; }
-  if (finger.fingerID != slot) { reason = "WRONG_DRIVER_SLOT"; return false; }
-  return true;
-}
-
-bool deletePrint(uint8_t slot, String &reason) {
-  if (!sensorReady) { reason = "SENSOR_OFFLINE"; return false; }
-  if (finger.deleteModel(slot) != FINGERPRINT_OK) { reason = "DELETE_FAILED"; return false; }
-  return true;
-}
-
 void syncClock() {
   if (WiFi.status() != WL_CONNECTED || clockReady) return;
   if (!ntpStarted) {
@@ -212,7 +158,6 @@ int httpsRequest(const String &path, const String *body, String &output) {
     http.addHeader("Content-Type", "application/json");
     code = http.POST(*body);
   } else {
-    http.addHeader("X-Sensor-Ready", sensorReady ? "1" : "0");
     code = http.GET();
   }
   output = http.getString();
@@ -244,7 +189,6 @@ bool submitPendingResult() {
 void processJob(JsonVariantConst job) {
   String jobId = job["id"].as<String>();
   String type = job["type"].as<String>();
-  int slot = job["slot"].isNull() ? 0 : job["slot"].as<int>();
   bool a = job["a"].as<int>() == 1;
   bool b = job["b"].as<int>() == 1;
   if (jobId.length() < 10) return;
@@ -255,14 +199,6 @@ void processJob(JsonVariantConst job) {
   if (type == "DECIDE") {
     success = startDecision(a, b, gateHigh);
     if (!success) reason = "AND_GATE_MISMATCH";
-  } else if (slot < 1 || slot > 127) {
-    reason = "BAD_FINGERPRINT_SLOT";
-  } else if (type == "ENROLL") {
-    success = enroll(slot, reason);
-  } else if (type == "VERIFY") {
-    success = verify(slot, reason);
-  } else if (type == "DELETE") {
-    success = deletePrint(slot, reason);
   } else {
     reason = "UNKNOWN_JOB";
   }
@@ -284,11 +220,7 @@ void setup() {
     Serial.println("FATAL: Cannot start output timer task; outputs remain disabled.");
     while (true) { allOff(); delay(1000); }
   }
-  sensorUart.begin(57600, SERIAL_8N1, FINGER_RX_PIN, FINGER_TX_PIN);
-  finger.begin(57600);
-  delay(250);
-  sensorReady = finger.verifyPassword();
-  Serial.println(sensorReady ? "R307/AS608 sensor: READY" : "R307/AS608 sensor: MISSING");
+  Serial.println("ESP32 Wi-Fi AND-gate demo; phone passkey handled by website");
   if (!hasConfig()) {
     Serial.println("ERROR: Set Wi-Fi, server, and device ID/key in config.h first.");
     return;
@@ -304,10 +236,6 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) { delay(100); return; }
   syncClock();
   if (!clockReady) { delay(200); return; }
-  if (!sensorReady && (int32_t)(millis() - nextSensorRetry) >= 0) {
-    sensorReady = finger.verifyPassword();
-    nextSensorRetry = millis() + SENSOR_RETRY_INTERVAL_MS;
-  }
   if ((int32_t)(millis() - nextPoll) < 0) { delay(20); return; }
   nextPoll = millis() + POLL_INTERVAL_MS;
   if (!submitPendingResult()) return; // don't claim new jobs until previous job acknowledged
