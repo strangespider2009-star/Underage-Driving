@@ -1,11 +1,12 @@
-# Deploy Underage-Driving passkey edition on Render
+# Deploy the Underage-Driving BLE edition
 
-The GitHub repository is already published:
-https://github.com/strangespider2009-star/Underage-Driving
+GitHub: https://github.com/strangespider2009-star/Underage-Driving
 
-## Render (Node Web Service)
+This edition uses **Android Chrome Web Bluetooth** between phone and ESP32. The ESP32 does **not** connect to Wi-Fi or Render. Render remains necessary for the website's login, face/demo policy and signed phone WebAuthn passkey verification.
 
-Use the existing underage-driving service connected to the main branch, or create a new service from render.yaml.
+## Render Web Service
+
+Use the existing Render service connected to the main branch and redeploy the latest commit, or deploy from render.yaml.
 
 Build command:
 
@@ -15,40 +16,38 @@ Start command:
 
     npm start
 
-Required configuration:
+Environment:
 
 - NODE_ENV=production
-- SESSION_SECRET=a secret random value of at least 24 characters (render.yaml can generate this)
-- PUBLIC_ORIGIN is optional for the default Render hostname, but REQUIRED for a custom public domain. It must match the phone browser origin exactly, e.g. https://example.com and no path or trailing slash.
-- RENDER_EXTERNAL_HOSTNAME is provided by Render for the normal onrender.com hostname.
+- SESSION_SECRET: 24+ random characters (render.yaml can generate it)
+- PUBLIC_ORIGIN: **only for a custom domain**; set the exact HTTPS site origin without trailing slash. Otherwise RENDER_EXTERNAL_HOSTNAME supplies the default Render host.
 
-## WebAuthn on phone
+Passkeys are tied to the exact deployed web domain. Changing the site hostname means enrolling a new passkey for that domain.
 
-1. Visit the actual NEW HTTPS deployment in Chrome or Safari on your phone (not the old LOGIX domain).
-2. Sign up or sign in, create a demo vehicle and an approved driver.
-3. In Enrollment, capture the face using the camera on that phone.
-4. Enrol the **phone passkey** with the system prompt. Your device may use fingerprint, face unlock or PIN.
-5. In Verification, verify the face and phone passkey, then evaluate the ESP32 7408 logic.
+**Persistence warning:** This demonstration currently stores users, passkey public keys, drivers, approvals and history in a local JSON file and uses in-memory sessions. Render Free instances can lose these after restarts/redeployments. Use a durable database/session store for any repeat deployment requiring persistent data.
 
-WebAuthn passkeys are bound to website domains; enroll and verify on the same domain. Passkey registration stores a public key and counter, not fingerprint images.
+## ESP32 BLE firmware and hardware
 
-## ESP32
+1. Install **esp32 by Espressif Systems 3.x** board package in Arduino IDE.
+2. Open the single file **firmware/ESP32_LOGIX/ESP32_LOGIX.ino**.
+3. No config.h, Wi-Fi credentials, ArduinoJson, trust_roots.h, HC-05, or R307 sensor is needed.
+4. Follow WIRING.md to connect ESP32 GPIO25/26, the REAL 7408 AND gate, safe output level interface at GPIO27, LEDs GPIO18/19, and active buzzer driver GPIO23.
+5. Upload with ESP32 Dev Module for a typical ESP32-WROOM-32 DevKit. Open Serial Monitor at 115200 and look for "LOGIX-BLE advertising".
 
-Open firmware/ESP32_LOGIX/ESP32_LOGIX.ino, copy config.example.h to config.h and fill Wi-Fi, server URL, registered device ID and key. No R307, AS608 or HC-05 is used.
+## Android phone test
 
-Install ArduinoJson v7 and the Espressif ESP32 board support. Wire the 7408, LEDs and buzzer as in WIRING.md and upload the sketch.
+1. Enable Bluetooth, open the **new Render HTTPS site in Android Chrome** (not a basic APK WebView).
+2. Sign in, create and approve a demo driver.
+3. Tap **Connect ESP32 via BLE**, choose **LOGIX-BLE** from the Chrome device chooser.
+4. In Enrollment, enroll the face in this phone browser and the phone passkey. Passkey prompt may use fingerprint, face unlock or PIN.
+5. In Verification, run face comparison and **Verify phone passkey**.
+6. Within 90 seconds, tap **Evaluate physical 7408 gate**. The backend consumes the one-use verified passkey proof, returns A/B; the phone writes BLE GATT command; ESP32 returns measured physical gate output.
+7. Confirm green 10 seconds for A=B=1, red+buzzer 10 seconds for other combinations. Check Access history BLE reply column.
 
-## Persistent data warning
+## Browser and security limitations
 
-The current file-backed JSON database and memory sessions are for demonstration only. Render Free ephemeral files may be erased after restarts or redeployments, deleting registered passkeys, owners, driver records and ESP32 device secrets. A durable database and shared session store are needed for a reliable long-lived deployment.
-
-## Troubleshooting
-
-- If the Render build fails at module resolution, verify that the deployment actually ran npm install after @simplewebauthn/server and @simplewebauthn/browser were added to package.json.
-- If passkeys say invalid origin, check PUBLIC_ORIGIN (custom domain) and use the same HTTPS hostname.
-- If the phone's security prompt is not shown inside a wrapped APK, use Chrome/Safari over HTTPS first.
-- If ESP32 says HTTP 401, check the registered device ID/key in config.h; do not share the key.
-- If ESP32 is offline, confirm 2.4GHz Wi-Fi, certificate validation, actual Render server URL and power.
-- If the 7408 gives AND_GATE_MISMATCH, inspect correct 5V/3.3V chip variant, pinout, and GPIO27 level interface.
-
-No circuit output may be attached to real vehicle wiring. This is a low-voltage classroom LED-and-buzzer demonstration.
+- Android Chrome on HTTPS supports Web Bluetooth; iPhone Safari and most Android WebView wrappers cannot use this website's Web Bluetooth feature.
+- The phone requires an internet connection to Render for passkey challenges, but the ESP32 does not.
+- The website cannot force fingerprint-only for passkeys; Android may use face unlock or PIN.
+- This is not secure BLE identity enforcement. Nearby BLE clients can send unauthenticated demonstration commands. Browser-reported hardware feedback in Render is not a device attestation.
+- Keep it a low-voltage LED-and-buzzer classroom display. Never attach circuit outputs to vehicle electronics or real locks.
