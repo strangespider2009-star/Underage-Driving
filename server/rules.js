@@ -5,18 +5,15 @@ export function validDate(value) {
   return Number.isFinite(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-export function evaluateDemoAccess({ driver, vehicle, faceMatched, fingerprintMatched }, now = new Date()) {
+export function evaluateDemoAccess({ driver, vehicle, faceMatched, passkeyMatched }, now = new Date()) {
   const exists = Boolean(driver && vehicle && driver.vehicleId === vehicle.id);
   const licenceValid = exists && validDate(driver.licenceExpiry) &&
     driver.licenceExpiry >= now.toISOString().slice(0, 10);
   const approved = exists && driver.approved === true;
-  const fingerprintEnrolled = exists && driver.fingerprintEnrolled === true;
+  const passkeyEnrolled = exists && driver.passkeyEnrolled === true;
   const face = faceMatched === true;
-  const fingerprint = fingerprintMatched === true && fingerprintEnrolled;
-  const checks = { correctVehicle: exists, faceMatched: face, fingerprintMatched: fingerprint, licenceValid, ownerApproved: approved };
+  const passkey = passkeyMatched === true && passkeyEnrolled;
+  const checks = { correctVehicle: exists, faceMatched: face, passkeyMatched: passkey, licenceValid, ownerApproved: approved };
   return { ...checks, checks, accessGranted: Object.values(checks).every(Boolean) };
 }
 
-export function validSlot(n) {
-  return Number.isInteger(n) && n >= 1 && n <= 127;
-}
