@@ -83,7 +83,7 @@ app.get('/api/dashboard', auth, (req, res) => {
   res.json({
     vehicles: db.vehicles.filter(x => x.ownerId === ownerId),
     drivers: db.drivers.filter(x => x.ownerId === ownerId).map(d => ({ ...d, passkeyEnrolled: (db.passkeys || []).some(p => p.ownerId === ownerId && p.driverId === d.id) })),
-    events: db.events.filter(x => x.ownerId === ownerId).slice(-80).reverse()
+    events: db.events.filter(x => x.ownerId === ownerId).slice(-80).reverse().map(({ sessionId, ...event }) => event)
   });
 });
 app.post('/api/vehicles', auth, (req, res) => {
