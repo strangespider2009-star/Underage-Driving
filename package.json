@@ -15,7 +15,7 @@
     "start": "node server/index.js",
     "dev:server": "node --env-file=.env server/index.js",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check server/index.js && node --check server/store.js && node --check server/device.js && node --check server/rules.js && node --check src/api.js && node --check src/face.js && node --check src/device.js && npm test"
+    "check": "node --check server/index.js && node --check server/store.js && node --check server/device.js && node --check server/rules.js && node --check server/passkeys.js && node --check src/api.js && node --check src/face.js && node --check src/device.js && node --check src/passkeys.js && npm test"
   },
   "dependencies": {
     "@vladmandic/face-api": "1.7.15",
@@ -23,7 +23,9 @@
     "express": "^5.1.0",
     "express-session": "^1.18.2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "@simplewebauthn/server": "^13.0.0",
+    "@simplewebauthn/browser": "^13.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
