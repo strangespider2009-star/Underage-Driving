@@ -1,50 +1,54 @@
-# Publish this NEW repo to GitHub and Render
+# Deploy Underage-Driving passkey edition on Render
 
-The supplied files and Git history are for a **new** GitHub repository named **`Underage-Driving`**. The existing LOGIX repository and existing Render URL should not be overwritten without an explicit migration decision.
+The GitHub repository is already published:
+https://github.com/strangespider2009-star/Underage-Driving
 
-## GitHub: create new empty repository
+## Render (Node Web Service)
 
-In your GitHub account (`strangespider2009-star`), open **New repository** and set the name to **Underage-Driving**. Keep it **empty**: do not pre-add a README, `.gitignore`, or license (these already exist in the supplied project). An empty repo allows the included 100-commit history to push without a conflict.
+Use the existing underage-driving service connected to the main branch, or create a new service from render.yaml.
 
-### Option A: ZIP containing `.git`
+Build command:
 
-Extract the full `Underage-Driving_with_git_history.zip` archive. In the extracted `Underage-Driving` folder, run:
+    npm install --include=dev && npm run check && npm run build
 
-```bash
-git log --oneline -5
-git rev-list --count HEAD
-git remote add origin https://github.com/strangespider2009-star/Underage-Driving.git
-git branch -M main
-git push -u origin main
-```
+Start command:
 
-You should see 100+ nonempty local commits before pushing. Sign in using GitHub's supported credential manager or GitHub Desktop, not a password pasted into a URL.
+    npm start
 
-### Option B: Git bundle
+Required configuration:
 
-```bash
-git clone Underage-Driving-100-commits.bundle Underage-Driving
-cd Underage-Driving
-git remote remove origin  # only if Git reports that a bundle remote is present
-git remote add origin https://github.com/strangespider2009-star/Underage-Driving.git
-git push -u origin main
-```
+- NODE_ENV=production
+- SESSION_SECRET=a secret random value of at least 24 characters (render.yaml can generate this)
+- PUBLIC_ORIGIN is optional for the default Render hostname, but REQUIRED for a custom public domain. It must match the phone browser origin exactly, e.g. https://example.com and no path or trailing slash.
+- RENDER_EXTERNAL_HOSTNAME is provided by Render for the normal onrender.com hostname.
 
-### If GitHub says repository not found
+## WebAuthn on phone
 
-Create the new repository in your GitHub account first, check the owner/name spelling, and make sure you have permission to push.
+1. Visit the actual NEW HTTPS deployment in Chrome or Safari on your phone (not the old LOGIX domain).
+2. Sign up or sign in, create a demo vehicle and an approved driver.
+3. In Enrollment, capture the face using the camera on that phone.
+4. Enrol the **phone passkey** with the system prompt. Your device may use fingerprint, face unlock or PIN.
+5. In Verification, verify the face and phone passkey, then evaluate the ESP32 7408 logic.
 
-## Render
+WebAuthn passkeys are bound to website domains; enroll and verify on the same domain. Passkey registration stores a public key and counter, not fingerprint images.
 
-1. Render → **New** → **Web Service** → connect `strangespider2009-star/Underage-Driving`.
-2. Name: `underage-driving` (or another available name).
-3. Build: `npm install --include=dev && npm run check && npm run build`.
-4. Start: `npm start`.
-5. Env: `NODE_ENV=production`; `SESSION_SECRET` randomly generated 32+ characters.
-6. Add durable `DATA_DIR` storage if you want users/drivers/hardware jobs to survive restarts. Free/ephemeral web service instances lose local JSON data on reset; a durable hosted DB is a future improvement.
-7. Visit your **new** service domain and register your ESP32 in **Setup guide**.
-8. Put the **new domain**, unique device ID, and secret into `firmware/ESP32_LOGIX/config.h` before upload. The old LOGIX Render URL does not have this device API.
+## ESP32
 
-## Before demonstrations
+Open firmware/ESP32_LOGIX/ESP32_LOGIX.ino, copy config.example.h to config.h and fill Wi-Fi, server URL, registered device ID and key. No R307, AS608 or HC-05 is used.
 
-Run `npm run check` and review the truth table in WIRING.md. Test on a bench using LEDs and an active buzzer only. For real security, build server-side facial verification, liveness checks, secure hardware keys, database storage, and independent authorization procedures; the current browser-generated face result must not be used to authorize a safety-critical action.
+Install ArduinoJson v7 and the Espressif ESP32 board support. Wire the 7408, LEDs and buzzer as in WIRING.md and upload the sketch.
+
+## Persistent data warning
+
+The current file-backed JSON database and memory sessions are for demonstration only. Render Free ephemeral files may be erased after restarts or redeployments, deleting registered passkeys, owners, driver records and ESP32 device secrets. A durable database and shared session store are needed for a reliable long-lived deployment.
+
+## Troubleshooting
+
+- If the Render build fails at module resolution, verify that the deployment actually ran npm install after @simplewebauthn/server and @simplewebauthn/browser were added to package.json.
+- If passkeys say invalid origin, check PUBLIC_ORIGIN (custom domain) and use the same HTTPS hostname.
+- If the phone's security prompt is not shown inside a wrapped APK, use Chrome/Safari over HTTPS first.
+- If ESP32 says HTTP 401, check the registered device ID/key in config.h; do not share the key.
+- If ESP32 is offline, confirm 2.4GHz Wi-Fi, certificate validation, actual Render server URL and power.
+- If the 7408 gives AND_GATE_MISMATCH, inspect correct 5V/3.3V chip variant, pinout, and GPIO27 level interface.
+
+No circuit output may be attached to real vehicle wiring. This is a low-voltage classroom LED-and-buzzer demonstration.
