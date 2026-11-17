@@ -1,211 +1,171 @@
 /*
-  UNDERAGE-DRIVING / LOGIX — ESP32-WROOM-32 firmware
-  Face matching and phone passkey verification happen in the browser/server.
-  The 7408 AND gate is physically driven on GPIO25/26 and its output is read on GPIO27.
-  Indicators operate for 10 seconds. This is a standalone low-voltage LED demo ONLY.
+  LOGIX / UNDERAGE-DRIVING: ESP32-WROOM-32 BLE AND-gate LED demo
 
-  Dependencies (Arduino IDE Library Manager):
-    ArduinoJson v7
-  Board package: esp32 by Espressif Systems
+  Does NOT use Wi-Fi, HC-05, R307, config.h, trust_roots.h or ArduinoJson.
+  Uses built-in ESP32 BLE peripheral and Nordic UART Service UUIDs.
+  This is an educational LOW-VOLTAGE LED + buzzer demonstration only.
+  NEVER attach outputs to an actual vehicle, lock, motor, or ignition.
 
-  Copy config.example.h -> config.h and enter Wi-Fi / backend / device credentials.
-  Certificate trust anchors are in trust_roots.h. Never put private keys in GitHub.
-  See ../../WIRING.md before powering the 7408 IC.
+  Works with "esp32 by Espressif Systems" 3.x board package (bundled BLE).
+
+  GPIO25  -> 7408 pin 1 (input A)
+  GPIO26  -> 7408 pin 2 (input B)
+  GPIO27  <- physical 7408 pin 3 through Q1 safe level interface
+  GPIO18  -> green LED + resistor
+  GPIO19  -> red LED + resistor
+  GPIO23  -> active buzzer transistor driver
+
+  Packet from phone: D + 6 hex nonce + A bit + B bit
+    Example D0A1B2C11
+  Notify to phone: R + same nonce + measured Y + status
+    P=green/approved, D=red/denied, F=AND-gate mismatch.
+    Example R0A1B21P
+  Each BLE packet is 9 ASCII bytes; fits minimum BLE notification MTU.
+
+  The mobile website authenticates the passkey with Render before sending
+  the bits. The ESP32 CANNOT independently verify the passkey or BLE sender.
+  This is not a secure access control scheme.
 */
+
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
-#include <time.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include "config.h"
-#include "trust_roots.h"
 
-static const uint8_t AND_INPUT_A = 25;    // 7408 pin 1
-static const uint8_t AND_INPUT_B = 26;    // 7408 pin 2
-static const uint8_t AND_SENSE_PIN = 27;  // inverted/safe interface from 7408 pin 3
-static const uint8_t GREEN_LED = 18;
-static const uint8_t RED_LED = 19;
-static const uint8_t BUZZER_TRANSISTOR = 23;
+#define BLE_DEVICE_NAME "LOGIX-BLE"
+#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define RX_UUID      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define TX_UUID      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-static const uint32_t RESULT_WINDOW_MS = 10000;
-static const uint32_t POLL_INTERVAL_MS = 1700;
+// 1 = SN7408/74LS08/74HCT08 at 5V, output via NPN inverter Q1.
+// 0 = 74HC08 powered at 3.3V, direct pin 3 to GPIO27.
+#define AND_GATE_OUTPUT_INVERTED 1
 
-uint32_t nextPoll = 0;
-bool ntpStarted = false;
-bool clockReady = false;
+static constexpr uint8_t AND_INPUT_A = 25;
+static constexpr uint8_t AND_INPUT_B = 26;
+static constexpr uint8_t AND_SENSE_PIN = 27;
+static constexpr uint8_t GREEN_LED = 18;
+static constexpr uint8_t RED_LED = 19;
+static constexpr uint8_t BUZZER = 23;
+
+static constexpr uint32_t WINDOW_MS = 10000;
+static constexpr uint32_t BUZZ_ON_MS = 180;
+static constexpr uint32_t BUZZ_OFF_MS = 380;
+
+BLEServer *bleServer = nullptr;
+BLECharacteristic *notifyChar = nullptr;
+volatile bool bleConnected = false;
+bool wasConnected = false;
+
+portMUX_TYPE rxMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool rxReady = false;
+char rxPacket[10] = {0};
 
 volatile bool decisionActive = false;
 volatile bool decisionApproved = false;
-volatile uint32_t decisionStartedAt = 0;
-volatile uint32_t lastBuzzerChangeAt = 0;
-volatile bool buzzerOn = false;
-
-// Buffer an acknowledgement until server accepts it, to avoid running the job twice.
-String pendingResultJson;
-
-bool hasConfig() {
-  return strlen(WIFI_SSID) > 0 && strstr(WIFI_SSID, "YOUR_") == nullptr &&
-    String(SERVER_URL).startsWith("https://") &&
-    strstr(SERVER_URL, "YOUR-") == nullptr &&
-    strlen(DEVICE_ID) > 20 && strlen(DEVICE_KEY) == 64;
-}
+volatile uint32_t startedAt = 0;
+volatile uint32_t lastBuzzAt = 0;
+volatile bool buzzerHigh = false;
 
 void allOff() {
   digitalWrite(AND_INPUT_A, LOW);
   digitalWrite(AND_INPUT_B, LOW);
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(RED_LED, LOW);
-  digitalWrite(BUZZER_TRANSISTOR, LOW);
+  digitalWrite(BUZZER, LOW);
   decisionActive = false;
-  buzzerOn = false;
+  buzzerHigh = false;
 }
 
-bool readPhysicalAnd() {
-  const bool pinHigh = digitalRead(AND_SENSE_PIN) == HIGH;
+bool physicalAndHigh() {
+  bool signal = digitalRead(AND_SENSE_PIN) == HIGH;
 #if AND_GATE_OUTPUT_INVERTED
-  return !pinHigh;   // NPN inverter: collector LOW means actual gate output HIGH
+  return !signal;
 #else
-  return pinHigh;    // 74HC08 powered at 3.3V: direct gate output
+  return signal;
 #endif
 }
 
-// Starts a nonblocking 10-second LED indicator. Only the physical AND gate is
-// permitted to produce green, and a gate wiring fault forces red+buzzer.
-bool startDecision(bool a, bool b, bool &gateHigh) {
+bool startDecision(bool a, bool b, bool &y) {
   allOff();
   digitalWrite(AND_INPUT_A, a ? HIGH : LOW);
   digitalWrite(AND_INPUT_B, b ? HIGH : LOW);
-  delay(5); // settle physical TTL/CMOS gate and interface transistor
-  gateHigh = readPhysicalAnd();
-  const bool gateMatchesTruthTable = gateHigh == (a && b);
-  decisionApproved = gateMatchesTruthTable && gateHigh && a && b;
+  delay(5);
+  y = physicalAndHigh();
+  bool matches = y == (a && b);
+  decisionApproved = matches && a && b && y;
   digitalWrite(GREEN_LED, decisionApproved ? HIGH : LOW);
   digitalWrite(RED_LED, decisionApproved ? LOW : HIGH);
+  buzzerHigh = !decisionApproved;
+  digitalWrite(BUZZER, buzzerHigh ? HIGH : LOW);
+  startedAt = millis();
+  lastBuzzAt = startedAt;
   decisionActive = true;
-  decisionStartedAt = millis();
-  lastBuzzerChangeAt = millis();
-  buzzerOn = !decisionApproved;
-  digitalWrite(BUZZER_TRANSISTOR, buzzerOn ? HIGH : LOW);
-  Serial.printf("AND A=%d B=%d measured Y=%d | %s | 10 seconds\n",
-    a, b, gateHigh, decisionApproved ? "GREEN" : "RED+BUZZER");
-  return gateMatchesTruthTable;
+  Serial.printf("AND A=%d B=%d real Y=%d -> %s for 10 seconds\n",
+                a, b, y, decisionApproved ? "GREEN" : "RED+BUZZER");
+  return matches;
 }
 
 void updateIndicators() {
   if (!decisionActive) return;
-  const uint32_t now = millis();
-  if ((uint32_t)(now - decisionStartedAt) >= RESULT_WINDOW_MS) {
+  uint32_t now = millis();
+  if (uint32_t(now - startedAt) >= WINDOW_MS) {
     allOff();
-    Serial.println("10-second result window complete; all outputs OFF");
+    Serial.println("10-second indicator window finished; outputs LOW.");
     return;
   }
   if (!decisionApproved) {
-    const uint32_t hold = buzzerOn ? 180 : 380;
-    if ((uint32_t)(now - lastBuzzerChangeAt) >= hold) {
-      buzzerOn = !buzzerOn;
-      digitalWrite(BUZZER_TRANSISTOR, buzzerOn ? HIGH : LOW);
-      lastBuzzerChangeAt = now;
+    uint32_t duration = buzzerHigh ? BUZZ_ON_MS : BUZZ_OFF_MS;
+    if (uint32_t(now - lastBuzzAt) >= duration) {
+      buzzerHigh = !buzzerHigh;
+      digitalWrite(BUZZER, buzzerHigh ? HIGH : LOW);
+      lastBuzzAt = now;
     }
   }
 }
 
-// Separate FreeRTOS task keeps the 10-second output timeout independent of
-// HTTPS requests and fingerprint scanning delays in the main Arduino loop.
-void indicatorTimerTask(void *unused) {
-  (void)unused;
+void indicatorTask(void *) {
   for (;;) {
     updateIndicators();
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
 
-void syncClock() {
-  if (WiFi.status() != WL_CONNECTED || clockReady) return;
-  if (!ntpStarted) {
-    configTime(0, 0, "pool.ntp.org", "time.google.com");
-    ntpStarted = true;
-    Serial.println("Synchronizing UTC clock for HTTPS certificate verification...");
+class ServerEvents : public BLEServerCallbacks {
+  void onConnect(BLEServer *) override {
+    bleConnected = true;
+    Serial.println("Web Bluetooth connected.");
   }
-  // Do not open TLS until the ESP32 clock is valid.
-  clockReady = time(nullptr) > 1700000000;
-}
-
-void wifiCheck() {
-  if (WiFi.status() == WL_CONNECTED) return;
-  static uint32_t lastAttempt = 0;
-  if (lastAttempt && millis() - lastAttempt < 10000) return;
-  lastAttempt = millis();
-  Serial.println("Connecting ESP32 Wi-Fi...");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-}
-
-int httpsRequest(const String &path, const String *body, String &output) {
-  if (WiFi.status() != WL_CONNECTED || !clockReady) return -1;
-  WiFiClientSecure client;
-  client.setCACert(ROOT_CA_BUNDLE); // Validates Render HTTPS server; no setInsecure().
-  client.setTimeout(8);
-  HTTPClient http;
-  const String url = String(SERVER_URL) + path;
-  if (!http.begin(client, url)) return -2;
-  http.setTimeout(8000);
-  http.addHeader("X-Device-Id", DEVICE_ID);
-  http.addHeader("X-Device-Key", DEVICE_KEY);
-  int code = 0;
-  if (body) {
-    http.addHeader("Content-Type", "application/json");
-    code = http.POST(*body);
-  } else {
-    code = http.GET();
+  void onDisconnect(BLEServer *) override {
+    bleConnected = false;
+    Serial.println("Web Bluetooth disconnected.");
   }
-  output = http.getString();
-  http.end();
-  return code;
-}
+};
 
-void setPendingResult(const String &jobId, bool success, const String &reason, bool gateHigh) {
-  JsonDocument doc;
-  doc["jobId"] = jobId;
-  doc["success"] = success;
-  doc["reason"] = reason;
-  doc["gateHigh"] = gateHigh;
-  serializeJson(doc, pendingResultJson);
-}
+class IncomingWrites : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    String value = characteristic->getValue();
+    if (value.length() != 9 || value.charAt(0) != 'D') return;
+    for (int i = 1; i <= 6; ++i) {
+      char c = value.charAt(i);
+      if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) return;
+    }
+    if ((value[7] != '0' && value[7] != '1') ||
+        (value[8] != '0' && value[8] != '1')) return;
 
-bool submitPendingResult() {
-  if (pendingResultJson.isEmpty()) return true;
-  String response;
-  int code = httpsRequest("/api/esp32/result", &pendingResultJson, response);
-  if (code == 200) {
-    pendingResultJson = "";
-    return true;
+    portENTER_CRITICAL(&rxMux);
+    // Never overwrite a pending command from a second BLE write.
+    if (!rxReady && !decisionActive) {
+      for (int i = 0; i < 9; ++i) rxPacket[i] = value[i];
+      rxPacket[9] = '\0';
+      rxReady = true;
+    }
+    portEXIT_CRITICAL(&rxMux);
   }
-  Serial.printf("Result acknowledgement failed (HTTP %d); will retry.\n", code);
-  return false;
-}
-
-void processJob(JsonVariantConst job) {
-  String jobId = job["id"].as<String>();
-  String type = job["type"].as<String>();
-  bool a = job["a"].as<int>() == 1;
-  bool b = job["b"].as<int>() == 1;
-  if (jobId.length() < 10) return;
-
-  String reason = "";
-  bool success = false;
-  bool gateHigh = false;
-  if (type == "DECIDE") {
-    success = startDecision(a, b, gateHigh);
-    if (!success) reason = "AND_GATE_MISMATCH";
-  } else {
-    reason = "UNKNOWN_JOB";
-  }
-  Serial.printf("JOB %s %s success=%d reason=%s\n", jobId.c_str(), type.c_str(), success, reason.c_str());
-  setPendingResult(jobId, success, reason, gateHigh);
-  submitPendingResult();
-}
+};
 
 void setup() {
   Serial.begin(115200);
@@ -214,39 +174,72 @@ void setup() {
   pinMode(AND_SENSE_PIN, INPUT);
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
-  pinMode(BUZZER_TRANSISTOR, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
   allOff();
-  if (xTaskCreate(indicatorTimerTask, "result-10s-timer", 2500, nullptr, 1, nullptr) != pdPASS) {
-    Serial.println("FATAL: Cannot start output timer task; outputs remain disabled.");
-    while (true) { allOff(); delay(1000); }
+
+  if (xTaskCreate(indicatorTask, "led-10-sec", 2500, nullptr, 1, nullptr) != pdPASS) {
+    Serial.println("ERROR: Cannot start indicator timer.");
+    while (true) { allOff(); delay(500); }
   }
-  Serial.println("ESP32 Wi-Fi AND-gate demo; phone passkey handled by website");
-  if (!hasConfig()) {
-    Serial.println("ERROR: Set Wi-Fi, server, and device ID/key in config.h first.");
-    return;
-  }
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  wifiCheck();
+
+  BLEDevice::init(BLE_DEVICE_NAME);
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new ServerEvents());
+  BLEService *service = bleServer->createService(SERVICE_UUID);
+
+  notifyChar = service->createCharacteristic(
+      TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  notifyChar->addDescriptor(new BLE2902());
+
+  BLECharacteristic *writeChar = service->createCharacteristic(
+      RX_UUID, BLECharacteristic::PROPERTY_WRITE);
+  writeChar->setCallbacks(new IncomingWrites());
+
+  service->start();
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  advertising->addServiceUUID(SERVICE_UUID);
+  advertising->setScanResponse(true);
+  advertising->start();
+
+  Serial.println("LOGIX-BLE advertising. Open the HTTPS website in Android Chrome.");
+  Serial.println("Select Connect ESP32 via BLE; no Wi-Fi or external sensor required.");
 }
 
 void loop() {
-  if (!hasConfig()) { delay(1000); return; }
-  wifiCheck();
-  if (WiFi.status() != WL_CONNECTED) { delay(100); return; }
-  syncClock();
-  if (!clockReady) { delay(200); return; }
-  if ((int32_t)(millis() - nextPoll) < 0) { delay(20); return; }
-  nextPoll = millis() + POLL_INTERVAL_MS;
-  if (!submitPendingResult()) return; // don't claim new jobs until previous job acknowledged
-  if (decisionActive) return; // result LEDs finish after exactly 10 seconds
-  String response;
-  int code = httpsRequest("/api/esp32/job", nullptr, response);
-  if (code != 200) {
-    Serial.printf("Server polling HTTP %d; Wi-Fi = %d\n", code, WiFi.status());
-    return;
+  // Re-advertise when the phone disconnects.
+  if (!bleConnected && wasConnected) {
+    delay(250);
+    bleServer->startAdvertising();
+    wasConnected = false;
+    Serial.println("BLE advertising restarted.");
   }
-  JsonDocument doc;
-  if (deserializeJson(doc, response)) { Serial.println("Invalid server JSON"); return; }
-  if (!doc["job"].isNull()) processJob(doc["job"].as<JsonVariantConst>());
+  if (bleConnected) wasConnected = true;
+
+  char packet[10] = {0};
+  bool haveCommand = false;
+  portENTER_CRITICAL(&rxMux);
+  if (rxReady) {
+    for (int i = 0; i < 10; ++i) packet[i] = rxPacket[i];
+    rxReady = false;
+    haveCommand = true;
+  }
+  portEXIT_CRITICAL(&rxMux);
+
+  if (haveCommand && !decisionActive) {
+    bool a = packet[7] == '1';
+    bool b = packet[8] == '1';
+    bool y = false;
+    bool gateCorrect = startDecision(a, b, y);
+    const char status = !gateCorrect ? 'F' : (y ? 'P' : 'D');
+
+    // R + six-byte nonce + measured gate output + status.
+    char reply[10] = {'R', packet[1], packet[2], packet[3], packet[4],
+                      packet[5], packet[6], y ? '1' : '0', status, '\0'};
+    if (bleConnected) {
+      notifyChar->setValue((uint8_t *)reply, 9);
+      notifyChar->notify();
+    }
+    Serial.printf("BLE reply: %s\n", reply);
+  }
+  delay(10);
 }
