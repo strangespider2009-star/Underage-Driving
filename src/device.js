@@ -7,6 +7,24 @@ export const BLE_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 export const BLE_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 export const BLE_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
+// Shared pure helpers used by BLE client and protocol unit tests.
+export function encodeBleCommand(nonce, a, b) {
+  if (typeof nonce !== 'string' || !/^[0-9A-F]{6}$/.test(nonce) ||
+      ![0, 1].includes(a) || ![0, 1].includes(b)) {
+    throw new Error('Invalid BLE demo command.');
+  }
+  return 'D' + nonce + a + b;
+}
+
+export function parseBleResponse(text) {
+  const found = /^R([0-9A-F]{6})([01])([PDF])$/.exec(text);
+  if (!found) return null;
+  const result = { nonce: found[1], gateHigh: found[2] === '1', status: found[3] };
+  if ((result.status === 'P' && !result.gateHigh) ||
+      (result.status === 'D' && result.gateHigh)) return null;
+  return result;
+}
+
 let device = null;
 let writeChar = null;
 let notifyChar = null;
@@ -43,13 +61,13 @@ function onNotification(event) {
   const view = event.target.value;
   if (!view) return;
   const text = new TextDecoder().decode(view);
-  const found = /^R([0-9A-F]{6})([01])([PDF])$/.exec(text);
-  if (!found || found[1] !== pending.nonce) return;
+  const found = parseBleResponse(text);
+  if (!found || found.nonce !== pending.nonce) return;
   const job = pending;
   pending = null;
   clearTimeout(job.timer);
-  const gateHigh = found[2] === '1';
-  const status = found[3]; // P = approved, D = denied, F = faulty/mismatched 7408.
+  const gateHigh = found.gateHigh;
+  const status = found.status; // P = approved, D = denied, F = faulty/mismatched 7408.
   if ((status === 'P' && !gateHigh) || (status === 'D' && gateHigh)) {
     job.reject(new Error('ESP32 returned inconsistent hardware feedback.'));
     return;
@@ -102,7 +120,7 @@ export async function sendBleDecision(a, b, timeoutMs = 6500) {
   const random = new Uint8Array(3);
   crypto.getRandomValues(random);
   const nonce = [...random].map(n => n.toString(16).padStart(2, '0')).join('').toUpperCase();
-  const packet = new TextEncoder().encode('D' + nonce + a + b);
+  const packet = new TextEncoder().encode(encodeBleCommand(nonce, a, b));
   const reply = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       clearPending('ESP32 did not acknowledge BLE decision. Check range and the GATT notifications.');
