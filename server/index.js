@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 import { readStore, writeStore, makeId } from './store.js';
 import { evaluateDemoAccess, validDate } from './rules.js';
 import { installPasskeyRoutes, validPasskeyProof } from './passkeys.js';
-import { authenticateDevice, hashKey, newDeviceKey, publicDevice, publicJob, queueJob, markExpired } from './device.js';
 
 const app = express();
 const production = process.env.NODE_ENV === 'production';
@@ -131,123 +130,75 @@ app.delete('/api/drivers/:id', auth, (req, res) => {
   db.passkeyProofs = (db.passkeyProofs || []).filter(p => !(p.ownerId === req.demoUser.id && p.driverId === req.params.id));
   writeStore(db); res.json({ ok: true });
 });
-// Owners provision their own ESP32. Its secret is shown only at registration or rotation.
-app.get('/api/devices', auth, (req, res) => {
-  const db = readStore();
-  res.json({ devices: db.devices.filter(d => d.ownerId === req.demoUser.id).map(publicDevice) });
-});
-app.post('/api/devices', auth, (req, res) => {
-  const db = readStore();
-  if (db.devices.filter(d => d.ownerId === req.demoUser.id).length >= 3)
-    return errors(res, 400, 'Maximum of three classroom devices per account.');
-  const name = normalized(req.body?.name).slice(0, 60) || 'LOGIX ESP32';
-  const key = newDeviceKey();
-  const device = { id: makeId(), ownerId: req.demoUser.id, name, keyHash: hashKey(key), lastSeenAt: null };
-  db.devices.push(device); writeStore(db);
-  res.status(201).json({ device: publicDevice(device), deviceKey: key });
-});
-app.post('/api/devices/:id/rotate-key', auth, (req, res) => {
-  const db = readStore();
-  const device = db.devices.find(d => d.id === req.params.id && d.ownerId === req.demoUser.id);
-  if (!device) return errors(res, 404, 'Device not found.');
-  const key = newDeviceKey();
-  device.keyHash = hashKey(key); device.lastSeenAt = null;
-  for (const job of db.jobs.filter(j => j.deviceId === device.id && ['queued', 'running'].includes(j.status))) {
-    job.status = 'error'; job.error = 'KEY_ROTATED';
-  }
-  writeStore(db); res.json({ device: publicDevice(device), deviceKey: key });
-});
-app.delete('/api/devices/:id', auth, (req, res) => {
-  const db = readStore();
-  const before = db.devices.length;
-  db.devices = db.devices.filter(d => !(d.id === req.params.id && d.ownerId === req.demoUser.id));
-  if (db.devices.length === before) return errors(res, 404, 'Device not found.');
-  db.jobs = db.jobs.filter(j => j.deviceId !== req.params.id);
-  writeStore(db); res.json({ ok: true });
-});
-// Only physical 7408 DECIDE jobs are queued after passkey verification.
-app.get('/api/device/jobs/:id', auth, (req, res) => {
-  const db = readStore();
-  markExpired(db); writeStore(db);
-  const job = db.jobs.find(j => j.id === req.params.id && j.ownerId === req.demoUser.id);
-  if (!job) return errors(res, 404, 'Device job not found.');
-  res.json({ job: publicJob(job) });
-});
-
-// ESP32 authenticates using its unique device ID and secret, not the owner's browser cookie.
-function deviceRequest(req, res, next) {
-  const db = readStore();
-  const device = authenticateDevice(db, req.get('X-Device-Id'), req.get('X-Device-Key'));
-  if (!device) return errors(res, 401, 'Unrecognized ESP32 credentials.');
-  req.device = device; req.deviceDb = db; next();
-}
-app.get('/api/esp32/job', deviceRequest, (req, res) => {
-  const db = req.deviceDb; markExpired(db);
-  const device = req.device;
-  device.lastSeenAt = new Date().toISOString();
-  let job = db.jobs.find(j => j.deviceId === device.id && j.status === 'running');
-  // Never issue a second job until the first one is acknowledged or times out.
-  if (!job) {
-    job = db.jobs.find(j => j.deviceId === device.id && j.status === 'queued');
-    if (job) { job.status = 'running'; job.startedAt = new Date().toISOString(); }
-  } else job = null;
-  writeStore(db);
-  res.json({ job: job ? { id: job.id, type: job.type, slot: job.slot, a: job.a, b: job.b } : null });
-});
-app.post('/api/esp32/result', deviceRequest, (req, res) => {
-  const db = req.deviceDb;
-  const job = db.jobs.find(j => j.id === req.body?.jobId && j.deviceId === req.device.id);
-  if (!job) return errors(res, 404, 'Job not found.');
-  if (['done', 'error'].includes(job.status)) return res.json({ ok: true, duplicate: true });
-  if (job.status !== 'running') return errors(res, 409, 'Job not started.');
-  if (typeof req.body?.success !== 'boolean') return errors(res, 400, 'Missing success boolean.');
-  const reason = normalized(req.body?.reason).slice(0, 48).replace(/[^a-zA-Z0-9_ -]/g, '');
-  job.success = req.body.success;
-  job.error = req.body.success ? null : reason || 'SENSOR_FAILED';
-  job.gateHigh = job.type === 'DECIDE' && typeof req.body?.gateHigh === 'boolean' ? req.body.gateHigh : null;
-  if (job.type === 'DECIDE') {
-    const expected = job.a === 1 && job.b === 1;
-    if (job.gateHigh !== expected) { job.success = false; job.error = 'AND_GATE_MISMATCH'; }
-  }
-  job.status = 'done'; job.completedAt = new Date().toISOString();
-  writeStore(db); res.json({ ok: true });
-});
-
+// Render verifies identity, but the phone transports demo bits to ESP32 over BLE.
+// A report from the browser is NOT independently authenticated by the hardware.
 app.post('/api/access/check', auth, (req, res) => {
   const db = readStore(); const ownerId = req.demoUser.id;
   const driver = db.drivers.find(d => d.id === req.body?.driverId && d.ownerId === ownerId);
   const vehicle = db.vehicles.find(v => v.id === req.body?.vehicleId && v.ownerId === ownerId);
   if (!driver || !vehicle) return errors(res, 404, 'Select a valid driver and vehicle.');
 
-  // Only an unused, recent, server-verified WebAuthn assertion makes input B HIGH.
+  // Input B is backed by an unused, server-verified WebAuthn proof, never
+  // by a claimed match flag from JavaScript.
   const proofId = req.body?.passkeyProofId;
   const proof = proofId ? validPasskeyProof(db, {
     id: proofId, ownerId, driverId: driver.id, sessionId: req.sessionID
   }) : null;
-  if (proofId && !proof) return errors(res, 400, 'Passkey verification expired or already used. Verify again.');
+  if (proofId && !proof) return errors(res, 400, 'Passkey verification expired or was already used. Verify again.');
 
   const passkeyEnrolled = (db.passkeys || []).some(p => p.ownerId === ownerId && p.driverId === driver.id);
   const faceMatched = req.body?.faceMatched === true;
   const passkeyMatched = Boolean(proof && passkeyEnrolled);
   const decision = evaluateDemoAccess({ driver: { ...driver, passkeyEnrolled }, vehicle, faceMatched, passkeyMatched });
   const policyPassed = decision.checks.correctVehicle && decision.checks.licenceValid && decision.checks.ownerApproved;
-  const a = faceMatched && policyPassed ? 1 : 0;
-  const b = passkeyMatched ? 1 : 0;
-  let job;
-  try {
-    job = queueJob(db, { ownerId, deviceId: req.body?.deviceId, driverId: driver.id, type: 'DECIDE', a, b });
-  } catch (err) { return errors(res, 409, err.message); }
+  const a = Number(faceMatched && policyPassed);
+  const b = Number(passkeyMatched);
   if (proof) proof.used = true;
+
   const event = {
-    id: makeId(), ownerId, at: new Date().toISOString(),
+    id: makeId(), ownerId, sessionId: req.sessionID, at: new Date().toISOString(),
     driverName: driver.name, vehicleName: vehicle.name,
     ...decision.checks, accessGranted: decision.accessGranted,
-    deviceJobId: job.id, hardwareInputA: a, hardwareInputB: b
+    hardwareInputA: a, hardwareInputB: b,
+    bleStatus: 'pending', gateHigh: null
   };
   db.events.push(event); db.events = db.events.slice(-3000);
   writeStore(db);
-  res.json({ decision, event, job: publicJob(job),
-    warning: 'LED-only classroom demo. Phone passkeys can use biometric or PIN; camera face results are browser-side.' });
+  res.json({
+    decision,
+    event: { ...event, sessionId: undefined },
+    command: { a, b },
+    warning: 'LED-only demo. Browser sends BLE bits; the returned hardware report is not an authenticated device attestation.'
+  });
+});
+
+// The browser reports ESP32 BLE GATT notification results to the demo log.
+// This is not a secure physical-device attestation; never use for real access.
+app.post('/api/access/report', auth, (req, res) => {
+  const db = readStore();
+  const event = db.events.find(e => e.id === req.body?.eventId && e.ownerId === req.demoUser.id && e.sessionId === req.sessionID);
+  if (!event) return errors(res, 404, 'Demo event not found.');
+  if (event.bleStatus !== 'pending') return errors(res, 409, 'Event already reported.');
+  if (Date.now() - Date.parse(event.at) > 45000) return errors(res, 409, 'BLE report window expired.');
+  const status = req.body?.status;
+  if (!['P', 'D', 'F', 'N'].includes(status)) return errors(res, 400, 'Invalid BLE response status.');
+  const output = req.body?.gateHigh;
+  const expected = Boolean(event.hardwareInputA && event.hardwareInputB);
+  if (status === 'N') {
+    if (output !== null) return errors(res, 400, 'A missing BLE reply must not claim a gate reading.');
+  } else {
+    if (typeof output !== 'boolean') return errors(res, 400, 'BLE report must include measured gate bit.');
+    if ((status === 'P' && (!output || !expected)) ||
+        (status === 'D' && (output || expected)) ||
+        (status === 'F' && output === expected)) {
+      return errors(res, 400, 'Inconsistent BLE gate report.');
+    }
+  }
+  event.bleStatus = status;
+  event.gateHigh = status === 'N' ? null : output;
+  event.hardwareReportedAt = new Date().toISOString();
+  writeStore(db);
+  res.json({ ok: true, status: event.bleStatus });
 });
 
 app.use('/api', (_req, res) => errors(res, 404, 'API endpoint not found.'));
