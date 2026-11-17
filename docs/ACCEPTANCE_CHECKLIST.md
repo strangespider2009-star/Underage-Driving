@@ -1,0 +1,104 @@
+# Underage-Driving · 100-point acceptance checklist
+
+Mark each item after a real bench/software check. These are **test requirements, not claims that hardware was tested**.
+
+- [ ] **001** Confirm owner registration requires a name, valid email and sufficiently long password.
+- [ ] **002** Confirm duplicate owner email is rejected.
+- [ ] **003** Confirm invalid owner login returns an error without leaking which field failed.
+- [ ] **004** Confirm signed-in owner receives only their own vehicles and drivers.
+- [ ] **005** Confirm logout destroys the owner session.
+- [ ] **006** Confirm the browser sends authenticated same-origin API requests.
+- [ ] **007** Confirm session secret is set to a long unpredictable value in production.
+- [ ] **008** Confirm session cookies are HttpOnly and Secure when served over HTTPS.
+- [ ] **009** Confirm every owner-facing hardware route checks the session.
+- [ ] **010** Confirm user data is stored on durable backing storage if persistence is required.
+- [ ] **011** Confirm new ESP32 registration produces a random unique device identifier.
+- [ ] **012** Confirm device registration creates a 256-bit device secret.
+- [ ] **013** Confirm device secrets are stored as hashes, not plaintext.
+- [ ] **014** Confirm device credentials are shown once to the registering owner.
+- [ ] **015** Confirm an ESP32 cannot authenticate with an incorrect device ID.
+- [ ] **016** Confirm an ESP32 cannot authenticate with a different secret.
+- [ ] **017** Confirm an owner cannot queue a job for someone else’s device.
+- [ ] **018** Confirm a device is flagged offline after missing heartbeats.
+- [ ] **019** Confirm the portal distinguishes offline ESP32 from missing fingerprint sensor.
+- [ ] **020** Confirm rotating an ESP32 key invalidates its previous credential.
+- [ ] **021** Confirm ENROLL command records the correct driver fingerprint slot.
+- [ ] **022** Confirm VERIFY command targets the expected driver slot.
+- [ ] **023** Confirm DELETE command cannot operate without a driver record.
+- [ ] **024** Confirm the ESP32 only receives commands addressed to its device ID.
+- [ ] **025** Confirm only one queued or running operation exists per ESP32.
+- [ ] **026** Confirm job identifiers remain unique across operations.
+- [ ] **027** Confirm a timed-out job becomes an error and no longer blocks the queue.
+- [ ] **028** Confirm the ESP32 acknowledges completed operations with their job identifiers.
+- [ ] **029** Confirm duplicate result acknowledgements do not repeat enrollment updates.
+- [ ] **030** Confirm fingerprint enrollment status changes only after the sensor reports success.
+- [ ] **031** Confirm browser camera requests permission on HTTPS or localhost.
+- [ ] **032** Confirm the camera stream is stopped when leaving the camera page.
+- [ ] **033** Confirm face enrollment needs multiple usable samples.
+- [ ] **034** Confirm enrollment rejects frames containing no clear face.
+- [ ] **035** Confirm enrollment rejects multiple faces in one frame.
+- [ ] **036** Confirm a new face is compared against the selected driver template.
+- [ ] **037** Confirm a different face fails verification.
+- [ ] **038** Confirm a face template is not accessible from another browser installation.
+- [ ] **039** Confirm deleting a face template clears only that selected driver.
+- [ ] **040** Confirm the UI explains browser face comparison does not guarantee liveness.
+- [ ] **041** Confirm R307 power supply voltage matches the exact module specification.
+- [ ] **042** Confirm R307 UART TX voltage is safe for ESP32 GPIO16.
+- [ ] **043** Confirm R307 UART RX accepts ESP32 3.3 V on GPIO17.
+- [ ] **044** Confirm sensor UART uses the configured baud rate of 57600.
+- [ ] **045** Confirm fingerprint enrollment requests a first image and template.
+- [ ] **046** Confirm fingerprint enrollment waits for finger removal.
+- [ ] **047** Confirm fingerprint enrollment requests a second image of the same finger.
+- [ ] **048** Confirm the module rejects two nonmatching impressions during enrollment.
+- [ ] **049** Confirm verified fingerprint slot equals the selected driver slot.
+- [ ] **050** Confirm a nonmatching fingerprint is reported as failure, never approval.
+- [ ] **051** Confirm the actual IC marking is identified before powering it.
+- [ ] **052** Confirm SN7408 5 V VCC pin 14 and GND pin 7 are wired correctly.
+- [ ] **053** Confirm 7408 gate input A is pin 1 and is driven by ESP32 GPIO25.
+- [ ] **054** Confirm 7408 gate input B is pin 2 and is driven by ESP32 GPIO26.
+- [ ] **055** Confirm 7408 first gate output Y is pin 3.
+- [ ] **056** Confirm unused gate inputs are not left floating.
+- [ ] **057** Confirm a 100 nF decoupling capacitor is next to 7408 supply pins.
+- [ ] **058** Confirm both gate inputs have external pull-downs during MCU boot.
+- [ ] **059** Confirm a 5 V TTL gate output is never connected directly to an ESP32 GPIO.
+- [ ] **060** Confirm Q1 output sensing transistor has correct E/B/C pin orientation.
+- [ ] **061** Confirm the Q1 collector pull-up goes to 3.3 V rather than 5 V.
+- [ ] **062** Confirm 74HC08-powered-at-3.3V variant omits Q1 and sets inversion false.
+- [ ] **063** Confirm the firmware tests the physical gate with A=0 and B=0.
+- [ ] **064** Confirm the firmware tests the physical gate with A=0 and B=1.
+- [ ] **065** Confirm the firmware tests the physical gate with A=1 and B=0.
+- [ ] **066** Confirm the firmware tests the physical gate with A=1 and B=1.
+- [ ] **067** Confirm the green LED has a series current-limiting resistor.
+- [ ] **068** Confirm the red LED has a series current-limiting resistor.
+- [ ] **069** Confirm the active buzzer is switched by a properly rated transistor.
+- [ ] **070** Confirm magnetic buzzer wiring uses a protective flyback diode if needed.
+- [ ] **071** Confirm green appears only for A=1, B=1 and measured gate Y=1.
+- [ ] **072** Confirm red appears when A=0 and B=0.
+- [ ] **073** Confirm red appears when A=0 and B=1.
+- [ ] **074** Confirm red appears when A=1 and B=0.
+- [ ] **075** Confirm an AND-gate mismatch triggers a red alert instead of green.
+- [ ] **076** Confirm the active buzzer pulses during denied indications.
+- [ ] **077** Confirm the buzzer stays off during green indications.
+- [ ] **078** Confirm the green LED turns off after the 10-second result window.
+- [ ] **079** Confirm the red LED turns off after the 10-second result window.
+- [ ] **080** Confirm both 7408 inputs return LOW after the 10-second result window.
+- [ ] **081** Confirm ESP32 joins a 2.4 GHz Wi-Fi network.
+- [ ] **082** Confirm ESP32 Wi-Fi reconnects when the access point returns.
+- [ ] **083** Confirm ESP32 time synchronizes with NTP before HTTPS requests.
+- [ ] **084** Confirm ESP32 validates the Render server certificate against trusted CA roots.
+- [ ] **085** Confirm ESP32 submits its unique device identifier and key in HTTPS headers.
+- [ ] **086** Confirm ESP32 polling does not use HC-05 or desktop Web Serial.
+- [ ] **087** Confirm ESP32 retries hardware result acknowledgements after transient network failures.
+- [ ] **088** Confirm the website displays ESP32 online status after a valid heartbeat.
+- [ ] **089** Confirm the website uses the new Render host rather than the original LOGIX domain.
+- [ ] **090** Confirm the ESP32 does not accept arbitrary unauthenticated inbound Wi-Fi commands.
+- [ ] **091** Confirm config.h containing Wi-Fi and device secrets is gitignored.
+- [ ] **092** Confirm no real Wi-Fi or device credentials are present in committed sources.
+- [ ] **093** Confirm fingerprint templates remain inside the optical sensor.
+- [ ] **094** Confirm raw face descriptors are never included in the server hardware command queue.
+- [ ] **095** Confirm owner consent is obtained before storing biometric templates.
+- [ ] **096** Confirm browser app camera permission is enabled in any Android WebView wrapper.
+- [ ] **097** Confirm the new GitHub repo is separate from the original LOGIX repository.
+- [ ] **098** Confirm Render builds dev dependencies needed for Vite with --include=dev.
+- [ ] **099** Confirm durable storage is used if records must survive Render restarts.
+- [ ] **100** Confirm no circuit outputs are attached to any real vehicle or safety-critical system.

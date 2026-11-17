@@ -1,0 +1,32 @@
+{
+  "name": "underage-driving-logix",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "predev": "node scripts/copy-face-models.mjs",
+    "dev": "vite --host 0.0.0.0",
+    "prebuild": "node scripts/copy-face-models.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "start": "node server/index.js",
+    "dev:server": "node --env-file=.env server/index.js",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check server/index.js && node --check server/store.js && node --check server/device.js && node --check server/rules.js && node --check src/api.js && node --check src/face.js && node --check src/device.js && npm test"
+  },
+  "dependencies": {
+    "@vladmandic/face-api": "1.7.15",
+    "bcryptjs": "^3.0.2",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0"
+  }
+}
