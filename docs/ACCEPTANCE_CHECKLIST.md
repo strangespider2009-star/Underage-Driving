@@ -1,60 +1,73 @@
-# Phone passkey + ESP32 AND-gate acceptance checklist
+# Underage-Driving BLE + passkey edition: acceptance checks
 
-These are **tests to perform**, not claims that real hardware has been tested. Do not attach the breadboard to a vehicle.
+These checkboxes are a **test plan**, not a claim that real ESP32 hardware was tested. The only permitted use is a low-voltage LED-and-buzzer desk demonstration; **never connect to a real vehicle or lock**.
 
-## Website and login
+## Website + face
 
-- [ ] Account registration and login work on the deployed HTTPS site.
-- [ ] Owner data is not exposed to other accounts.
-- [ ] A demo vehicle and driver can be created and approved.
-- [ ] An unapproved driver cannot produce A=1 even when the face matches.
-- [ ] Face enrollment and verification work in the same mobile browser.
-- [ ] Face templates remain in that browser; a different browser must enroll separately.
-- [ ] Camera permissions are requested correctly and camera stops after leaving the page.
-- [ ] The interface clearly states that browser face matching is not liveness detection.
+- [ ] The latest Render deployment serves the updated LOGIX website on HTTPS.
+- [ ] Owner can sign in, add a sample vehicle and driver, and approve the driver.
+- [ ] Camera enrollment stores face descriptor locally in that phone browser.
+- [ ] Face comparison passes for enrolled face and fails for a clearly different face.
+- [ ] Face checks do not claim independent liveness protection.
+- [ ] Driver without owner approval makes the demo A input LOW.
 
-## Phone passkeys
+## Phone passkey / Render
 
-- [ ] On mobile Chrome or Safari over HTTPS, Enrol phone passkey opens the system prompt.
-- [ ] Phone local verification may use fingerprint, face unlock or PIN; the site does not claim fingerprint-only.
-- [ ] Server creates and verifies WebAuthn challenges; it does not store a phone fingerprint or PIN.
-- [ ] Registration checks public-key attestation response and origin/RP ID.
-- [ ] Only the enrolled driver's credential ID can authenticate that driver.
-- [ ] Verification checks authenticator signature and requires userVerification.
-- [ ] Incorrect, cancelled, absent or malformed assertions do not produce a passkey proof.
-- [ ] A passkey proof cannot be used for another owner, driver or browser session.
-- [ ] A passkey proof expires after 90 seconds.
-- [ ] A passkey proof is single-use and cannot be replayed for another green result.
-- [ ] Removing passkey invalidates future authentication for that driver.
-- [ ] Changing Render domain requires registering a new domain-bound passkey.
-- [ ] The user is warned that basic WebView APKs may not support passkey UI.
+- [ ] Android Chrome on the deployed HTTPS domain shows **Enrol phone passkey**.
+- [ ] Phone passkey prompt is handled by the operating system; fingerprint/face/PIN may be offered.
+- [ ] Server saves public credential key, not phone fingerprint scans.
+- [ ] **Verify phone passkey** requires a signed, user-verified response to a fresh challenge.
+- [ ] An aborted or unsuccessful passkey prompt cannot produce a passing proof.
+- [ ] A server-issued passkey proof expires after 90 seconds and is bound to the same browser session/driver.
+- [ ] A passkey proof is consumed only once.
+- [ ] Server sends B=1 only after validating an unused passkey proof.
+- [ ] The phone still has internet to reach Render, but ESP32 does not require internet.
+- [ ] Changing deployed site domain requires registering a passkey for the new domain.
 
-## ESP32 and physical 7408
+## Web Bluetooth
 
-- [ ] ESP32 connects to configured 2.4GHz Wi-Fi.
-- [ ] Device authenticates with its own ID and secret via HTTPS.
-- [ ] ESP32 is shown ONLINE and changes to OFFLINE when disconnected.
-- [ ] No Bluetooth module or fingerprint sensor is used.
-- [ ] The ESP32 firmware has no Adafruit Fingerprint Sensor dependency.
-- [ ] Classic 7408 family chip marking and safe logic voltage interface are verified.
-- [ ] 7408 pins 14 and 7 connect to appropriate supply/GND.
-- [ ] GPIO25 and GPIO26 each have a 10kΩ pull-down and drive 7408 pins 1 and 2.
-- [ ] GPIO27 senses a safely level-shifted output of 7408 pin 3.
-- [ ] 5V IC outputs are never connected directly to ESP32 3.3V GPIOs.
-- [ ] GPIO18 green and GPIO19 red LEDs have series resistors.
-- [ ] GPIO23 drives the buzzer through an appropriate transistor.
-- [ ] All grounds are common and power rails are stable.
+- [ ] On Android Chrome, pressing **Connect ESP32 via BLE** shows the Bluetooth device chooser.
+- [ ] ESP32 is visible as **LOGIX-BLE** and GATT connection succeeds.
+- [ ] Interface displays BLE CONNECTED; disconnect event changes status.
+- [ ] BLE disconnect and reconnect work without restarting the website.
+- [ ] BLE RX and TX use Nordic UART Service UUIDs documented in README.
+- [ ] Phone sends a valid 9-byte command D+nonce+A+B.
+- [ ] ESP32 notifies R+same nonce+measured Y+P/D/F; browser ignores wrong nonces/malformed messages.
+- [ ] When notifications fail, website reports NO REPLY rather than claiming physical confirmation.
+- [ ] Browser BLE results in the history are labeled as browser-reported, not cryptographically authenticated device evidence.
+- [ ] A normal Android WebView APK and iPhone Safari do not misleadingly show BLE as supported.
 
-## Truth table and timing
+## ESP32 and actual 7408
 
-- [ ] A=0 B=0 yields measured Y=0 and red LED + buzzer.
-- [ ] A=0 B=1 yields measured Y=0 and red LED + buzzer.
-- [ ] A=1 B=0 yields measured Y=0 and red LED + buzzer.
-- [ ] A=1 B=1 yields measured Y=1 and green LED.
-- [ ] Physical gate output mismatches report AND_GATE_MISMATCH and fail red.
-- [ ] Indicators turn off after about 10 seconds; both logic inputs reset low.
-- [ ] Red buzzer pulses rather than remaining continuously on.
-- [ ] Access history records passkey and face outcomes.
-- [ ] ESP32 cannot queue parallel DECIDE jobs for the same device.
-- [ ] Device secret does not appear in GitHub or screenshots.
-- [ ] A persistent database/session store is configured if data must survive Render restarts.
+- [ ] ESP32 DevKit firmware uploads with Espressif Arduino core 3.x.
+- [ ] Firmware has no Wi-Fi, ArduinoJson, config.h, trust_roots.h, R307, or HC-05 dependency.
+- [ ] BLE advertises after boot and again after disconnect.
+- [ ] Actual IC model, notch orientation, and supply voltage are confirmed by datasheet.
+- [ ] 7408 input A is on GPIO25 and B on GPIO26 with 10kΩ pulldowns.
+- [ ] 7408 physical output on GPIO27 uses the correct level-safe interface and inversion setting.
+- [ ] 5V is never fed into an ESP32 GPIO.
+- [ ] Unused 7408 gate inputs are tied to a defined level.
+- [ ] 100nF decoupling capacitor is placed close to the IC supply pins.
+- [ ] Green LED/resistor on GPIO18; red LED/resistor on GPIO19.
+- [ ] Active buzzer connected via suitable Q2 driver on GPIO23.
+- [ ] All grounds common, regulated supplies within current limits.
+
+## Logic and output
+
+| A | B | Actual Y | Expected |
+|---:|---:|---:|---|
+| 0 | 0 | 0 | Red LED + pulsed buzzer for 10 sec |
+| 0 | 1 | 0 | Red LED + pulsed buzzer for 10 sec |
+| 1 | 0 | 0 | Red LED + pulsed buzzer for 10 sec |
+| 1 | 1 | 1 | Green LED for 10 sec |
+
+- [ ] All LEDs, buzzer, and 7408 input pins return LOW/OFF after approximately ten seconds.
+- [ ] Physical gate mismatch produces a FAULT response and red+buzzer, never green.
+- [ ] A second command during active indication cannot prematurely extend the timer.
+- [ ] No signal is connected to a real vehicle or any safety-critical actuator.
+
+## Deployment health
+
+- [ ] GitHub Actions npm tests and frontend build pass.
+- [ ] Render is redeployed to the latest GitHub commit and /api/health returns ok.
+- [ ] The project has durable database/session storage if user registrations must survive restarts.
