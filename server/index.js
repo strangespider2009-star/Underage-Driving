@@ -6,7 +6,8 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readStore, writeStore, makeId } from './store.js';
-import { evaluateDemoAccess, validDate, validSlot } from './rules.js';
+import { evaluateDemoAccess, validDate } from './rules.js';
+import { installPasskeyRoutes, validPasskeyProof } from './passkeys.js';
 import { authenticateDevice, hashKey, newDeviceKey, publicDevice, publicJob, queueJob, markExpired } from './device.js';
 
 const app = express();
@@ -38,6 +39,8 @@ const saveSession = (req, res, body, status = 200) => req.session.save(err => {
   if (err) return errors(res, 500, 'Could not save session.');
   res.status(status).json(body);
 });
+
+installPasskeyRoutes(app, auth, errors);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, mode: 'LED demonstration only' }));
 app.get('/api/me', (req, res) => {
@@ -80,7 +83,7 @@ app.get('/api/dashboard', auth, (req, res) => {
   const db = readStore(); const ownerId = req.demoUser.id;
   res.json({
     vehicles: db.vehicles.filter(x => x.ownerId === ownerId),
-    drivers: db.drivers.filter(x => x.ownerId === ownerId),
+    drivers: db.drivers.filter(x => x.ownerId === ownerId).map(d => ({ ...d, passkeyEnrolled: (db.passkeys || []).some(p => p.ownerId === ownerId && p.driverId === d.id) })),
     events: db.events.filter(x => x.ownerId === ownerId).slice(-80).reverse()
   });
 });
@@ -105,15 +108,12 @@ app.post('/api/drivers', auth, (req, res) => {
   const name = normalized(req.body?.name).slice(0, 100);
   const licenceExpiry = normalized(req.body?.licenceExpiry);
   const vehicleId = normalized(req.body?.vehicleId);
-  const fingerprintSlot = Number(req.body?.fingerprintSlot);
-  if (!name || !validDate(licenceExpiry) || !validSlot(fingerprintSlot))
-    return errors(res, 400, 'Enter a driver name, real expiry date, and sensor slot 1–127.');
+  if (!name || !validDate(licenceExpiry))
+    return errors(res, 400, 'Enter a driver name and a valid test expiry date.');
   const db = readStore();
   if (!db.vehicles.some(v => v.id === vehicleId && v.ownerId === req.demoUser.id))
     return errors(res, 400, 'Select one of your vehicles.');
-  if (db.drivers.some(d => d.ownerId === req.demoUser.id && d.fingerprintSlot === fingerprintSlot))
-    return errors(res, 409, 'Fingerprint slot already assigned. Choose a different slot.');
-  const driver = { id: makeId(), ownerId: req.demoUser.id, name, licenceExpiry, vehicleId, fingerprintSlot, fingerprintEnrolled: false, approved: false, createdAt: new Date().toISOString() };
+  const driver = { id: makeId(), ownerId: req.demoUser.id, name, licenceExpiry, vehicleId, approved: false, createdAt: new Date().toISOString() };
   db.drivers.push(driver); writeStore(db); res.status(201).json({ driver });
 });
 app.patch('/api/drivers/:id/approval', auth, (req, res) => {
@@ -123,14 +123,12 @@ app.patch('/api/drivers/:id/approval', auth, (req, res) => {
   if (!driver) return errors(res, 404, 'Driver not found.');
   driver.approved = req.body.approved; writeStore(db); res.json({ driver });
 });
-app.patch('/api/drivers/:id/fingerprint', auth, (_req, res) =>
-  errors(res, 403, 'Only ESP32 sensor responses can change fingerprint enrollment status.'));
-
 app.delete('/api/drivers/:id', auth, (req, res) => {
   const db = readStore(); const before = db.drivers.length;
   db.drivers = db.drivers.filter(d => !(d.id === req.params.id && d.ownerId === req.demoUser.id));
   if (before === db.drivers.length) return errors(res, 404, 'Driver not found.');
-  // This removes only a database record. Delete the sensor template before this step.
+  db.passkeys = (db.passkeys || []).filter(p => !(p.ownerId === req.demoUser.id && p.driverId === req.params.id));
+  db.passkeyProofs = (db.passkeyProofs || []).filter(p => !(p.ownerId === req.demoUser.id && p.driverId === req.params.id));
   writeStore(db); res.json({ ok: true });
 });
 // Owners provision their own ESP32. Its secret is shown only at registration or rotation.
@@ -167,21 +165,7 @@ app.delete('/api/devices/:id', auth, (req, res) => {
   db.jobs = db.jobs.filter(j => j.deviceId !== req.params.id);
   writeStore(db); res.json({ ok: true });
 });
-// Browser queues fingerprint commands. Fingerprint templates remain on the UART sensor.
-app.post('/api/device/jobs', auth, (req, res) => {
-  const db = readStore();
-  const type = req.body?.type;
-  const driver = db.drivers.find(d => d.id === req.body?.driverId && d.ownerId === req.demoUser.id);
-  const deviceId = req.body?.deviceId;
-  if (!['ENROLL', 'VERIFY', 'DELETE'].includes(type)) return errors(res, 400, 'Invalid hardware operation.');
-  if (!driver) return errors(res, 404, 'Driver not found.');
-  if (type !== 'ENROLL' && !driver.fingerprintEnrolled)
-    return errors(res, 400, 'Driver does not have a recorded enrolled fingerprint.');
-  try {
-    const job = queueJob(db, { ownerId: req.demoUser.id, deviceId, driverId: driver.id, type, slot: driver.fingerprintSlot });
-    writeStore(db); res.status(201).json({ job: publicJob(job) });
-  } catch (err) { return errors(res, 409, err.message); }
-});
+// Only physical 7408 DECIDE jobs are queued after passkey verification.
 app.get('/api/device/jobs/:id', auth, (req, res) => {
   const db = readStore();
   markExpired(db); writeStore(db);
@@ -201,7 +185,6 @@ app.get('/api/esp32/job', deviceRequest, (req, res) => {
   const db = req.deviceDb; markExpired(db);
   const device = req.device;
   device.lastSeenAt = new Date().toISOString();
-  device.sensorReady = req.get('X-Sensor-Ready') === '1';
   let job = db.jobs.find(j => j.deviceId === device.id && j.status === 'running');
   // Never issue a second job until the first one is acknowledged or times out.
   if (!job) {
@@ -227,10 +210,6 @@ app.post('/api/esp32/result', deviceRequest, (req, res) => {
     if (job.gateHigh !== expected) { job.success = false; job.error = 'AND_GATE_MISMATCH'; }
   }
   job.status = 'done'; job.completedAt = new Date().toISOString();
-  if ((job.type === 'ENROLL' || job.type === 'DELETE') && job.success) {
-    const driver = db.drivers.find(d => d.id === job.driverId && d.ownerId === job.ownerId);
-    if (driver) driver.fingerprintEnrolled = job.type === 'ENROLL';
-  }
   writeStore(db); res.json({ ok: true });
 });
 
@@ -239,30 +218,36 @@ app.post('/api/access/check', auth, (req, res) => {
   const driver = db.drivers.find(d => d.id === req.body?.driverId && d.ownerId === ownerId);
   const vehicle = db.vehicles.find(v => v.id === req.body?.vehicleId && v.ownerId === ownerId);
   if (!driver || !vehicle) return errors(res, 404, 'Select a valid driver and vehicle.');
-  const fingerprintJob = db.jobs.find(j => j.id === req.body?.fingerprintJobId && j.ownerId === ownerId &&
-    j.driverId === driver.id && j.deviceId === req.body?.deviceId && j.type === 'VERIFY');
-  if (!fingerprintJob || fingerprintJob.status !== 'done' || fingerprintJob.usedForDecision ||
-      Date.now() - Date.parse(fingerprintJob.completedAt) > 120000)
-    return errors(res, 400, 'Verify the fingerprint on the ESP32 again before evaluating.');
-  const fingerprintMatched = fingerprintJob.success === true;
+
+  // Only an unused, recent, server-verified WebAuthn assertion makes input B HIGH.
+  const proofId = req.body?.passkeyProofId;
+  const proof = proofId ? validPasskeyProof(db, {
+    id: proofId, ownerId, driverId: driver.id, sessionId: req.sessionID
+  }) : null;
+  if (proofId && !proof) return errors(res, 400, 'Passkey verification expired or already used. Verify again.');
+
+  const passkeyEnrolled = (db.passkeys || []).some(p => p.ownerId === ownerId && p.driverId === driver.id);
   const faceMatched = req.body?.faceMatched === true;
-  const decision = evaluateDemoAccess({ driver, vehicle, faceMatched, fingerprintMatched });
-  // Input A = face AND owner/date/vehicle policy. Input B = physical fingerprint match.
-  // This never permits both inputs to be 1 when an additional policy check fails.
+  const passkeyMatched = Boolean(proof && passkeyEnrolled);
+  const decision = evaluateDemoAccess({ driver: { ...driver, passkeyEnrolled }, vehicle, faceMatched, passkeyMatched });
   const policyPassed = decision.checks.correctVehicle && decision.checks.licenceValid && decision.checks.ownerApproved;
   const a = faceMatched && policyPassed ? 1 : 0;
-  const b = fingerprintMatched ? 1 : 0;
+  const b = passkeyMatched ? 1 : 0;
   let job;
   try {
     job = queueJob(db, { ownerId, deviceId: req.body?.deviceId, driverId: driver.id, type: 'DECIDE', a, b });
   } catch (err) { return errors(res, 409, err.message); }
-  fingerprintJob.usedForDecision = true;
-  const event = { id: makeId(), ownerId, at: new Date().toISOString(), driverName: driver.name,
-    vehicleName: vehicle.name, ...decision.checks, accessGranted: decision.accessGranted,
-    deviceJobId: job.id, hardwareInputA: a, hardwareInputB: b };
+  if (proof) proof.used = true;
+  const event = {
+    id: makeId(), ownerId, at: new Date().toISOString(),
+    driverName: driver.name, vehicleName: vehicle.name,
+    ...decision.checks, accessGranted: decision.accessGranted,
+    deviceJobId: job.id, hardwareInputA: a, hardwareInputB: b
+  };
   db.events.push(event); db.events = db.events.slice(-3000);
   writeStore(db);
-  res.json({ decision, event, job: publicJob(job), warning: 'Classroom LED demo only. Browser face results are not secure identity proof.' });
+  res.json({ decision, event, job: publicJob(job),
+    warning: 'LED-only classroom demo. Phone passkeys can use biometric or PIN; camera face results are browser-side.' });
 });
 
 app.use('/api', (_req, res) => errors(res, 404, 'API endpoint not found.'));
