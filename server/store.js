@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 
 const directory = path.resolve(process.env.DATA_DIR || './server/local-data');
 const file = path.join(directory, 'demo-data.json');
-const empty = () => ({ users: [], vehicles: [], drivers: [], events: [], devices: [], jobs: [] });
+const empty = () => ({ users: [], vehicles: [], drivers: [], events: [], devices: [], jobs: [], passkeys: [], passkeyProofs: [] });
 fs.mkdirSync(directory, { recursive: true });
 if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify(empty(), null, 2), { flag: 'wx', mode: 0o600 });
 export const makeId = () => crypto.randomUUID();
