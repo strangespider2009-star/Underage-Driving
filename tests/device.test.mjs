@@ -5,7 +5,7 @@ import { authenticateDevice, hashKey, newDeviceKey, publicDevice, publicJob, que
 
 function fixture() {
   const key = newDeviceKey();
-  const device = { id: crypto.randomUUID(), name: 'Demo ESP32', ownerId: 'owner-1', keyHash: hashKey(key), lastSeenAt: new Date().toISOString(),  };
+  const device = { id: crypto.randomUUID(), name: 'Demo ESP32', ownerId: 'owner-1', keyHash: hashKey(key), lastSeenAt: new Date().toISOString() };
   return { db: { devices: [device], jobs: [] }, device, key };
 }
 test('device keys are unpredictable 256-bit hex strings', () => {
@@ -44,7 +44,7 @@ test('cannot queue for another owner', () => {
 test('rejects parallel jobs on one ESP32', () => {
   const { db, device } = fixture();
   queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'DECIDE', a: 0, b: 1 });
-  assert.throws(() => queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'VERIFY', slot: 1 }), /busy/);
+  assert.throws(() => queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'DECIDE', a: 1, b: 1 }), /busy/);
 });
 test('offline ESP32 cannot receive a new job', () => {
   const { db, device } = fixture(); device.lastSeenAt = new Date(Date.now() - 60000).toISOString();
@@ -52,14 +52,14 @@ test('offline ESP32 cannot receive a new job', () => {
 });
 test('stale jobs expire and unblock the next job', () => {
   const { db, device } = fixture();
-  const job = queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'ENROLL', slot: 1 });
+  const job = queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'DECIDE', a: 0, b: 1 });
   markExpired(db, Date.parse(job.createdAt) + 101000);
   assert.equal(job.status, 'error'); assert.equal(job.error, 'DEVICE_TIMEOUT');
-  assert.doesNotThrow(() => queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'VERIFY', slot: 1 }));
+  assert.doesNotThrow(() => queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'DECIDE', a: 1, b: 1 }));
 });
 test('public jobs omit driver and owner identifiers', () => {
   const { db, device } = fixture();
-  const job = queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'VERIFY', slot: 1 });
+  const job = queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'DECIDE', a: 1, b: 1 });
   const safe = publicJob(job);
   assert.equal('ownerId' in safe, false); assert.equal('deviceId' in safe, false);
 });
