@@ -6,7 +6,7 @@ const isHexId = v => typeof v === 'string' && /^[0-9a-f-]{16,60}$/.test(v);
 export const hashKey = key => crypto.createHash('sha256').update(String(key)).digest('hex');
 export const newDeviceKey = () => crypto.randomBytes(32).toString('hex');
 export const publicDevice = device => ({
-  id: device.id, name: device.name, lastSeenAt: device.lastSeenAt || null
+  id: device.id, name: device.name, lastSeenAt: device.lastSeenAt || null,
   online: Boolean(device.lastSeenAt && Date.now() - Date.parse(device.lastSeenAt) < ONLINE_WINDOW_MS)
 });
 export function authenticateDevice(db, id, key) {
