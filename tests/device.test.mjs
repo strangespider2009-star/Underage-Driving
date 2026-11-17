@@ -5,7 +5,7 @@ import { authenticateDevice, hashKey, newDeviceKey, publicDevice, publicJob, que
 
 function fixture() {
   const key = newDeviceKey();
-  const device = { id: crypto.randomUUID(), name: 'Demo ESP32', ownerId: 'owner-1', keyHash: hashKey(key), lastSeenAt: new Date().toISOString(), sensorReady: true };
+  const device = { id: crypto.randomUUID(), name: 'Demo ESP32', ownerId: 'owner-1', keyHash: hashKey(key), lastSeenAt: new Date().toISOString(),  };
   return { db: { devices: [device], jobs: [] }, device, key };
 }
 test('device keys are unpredictable 256-bit hex strings', () => {
@@ -33,17 +33,17 @@ test('public device omits private key hash', () => {
 });
 test('queued jobs are owned, unique and start pending', () => {
   const { db, device } = fixture();
-  const job = queueJob(db, { ownerId: 'owner-1', deviceId: device.id, driverId: 'driver', type: 'VERIFY', slot: 1 });
-  assert.equal(job.status, 'queued'); assert.equal(job.slot, 1); assert.equal(job.ownerId, 'owner-1');
+  const job = queueJob(db, { ownerId: 'owner-1', deviceId: device.id, driverId: 'driver', type: 'DECIDE', a: 1, b: 1 });
+  assert.equal(job.status, 'queued'); assert.equal(job.a, 1); assert.equal(job.ownerId, 'owner-1');
   assert.ok(job.id); assert.equal(db.jobs.length, 1);
 });
 test('cannot queue for another owner', () => {
   const { db, device } = fixture();
-  assert.throws(() => queueJob(db, { ownerId: 'wrong', deviceId: device.id, type: 'VERIFY' }), /Device not found/);
+  assert.throws(() => queueJob(db, { ownerId: 'wrong', deviceId: device.id, type: 'DECIDE', a: 1, b: 1 }), /Device not found/);
 });
 test('rejects parallel jobs on one ESP32', () => {
   const { db, device } = fixture();
-  queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'ENROLL', slot: 1 });
+  queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'DECIDE', a: 0, b: 1 });
   assert.throws(() => queueJob(db, { ownerId: 'owner-1', deviceId: device.id, type: 'VERIFY', slot: 1 }), /busy/);
 });
 test('offline ESP32 cannot receive a new job', () => {
