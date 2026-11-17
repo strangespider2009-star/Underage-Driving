@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api, post, patch, del } from './api.js';
 import { startCamera, stopCamera, enrollFace, verifyFace, hasFace, deleteFace } from './face.js';
-import { getDevices, registerDevice, runFingerprint, waitForJob } from './device.js';
+import { getDevices, registerDevice, waitForJob } from './device.js';
+import { enrollPhonePasskey, verifyPhonePasskey, passkeySupported } from './passkeys.js';
 
 const NAV = [
   ['overview', 'Overview', '▦'], ['vehicles', 'Vehicles', '▤'],
@@ -47,10 +48,10 @@ export default function App() {
   const [devices, setDevices] = useState([]);
   const [deviceId, setDeviceId] = useState('');
   const [provision, setProvision] = useState(null);
-  const [fingerprintJobId, setFingerprintJobId] = useState('');
+  const [passkeyProofId, setPasskeyProofId] = useState('');
   const [driverId, setDriverId] = useState('');
   const [faceState, setFaceState] = useState('pending');
-  const [fpState, setFpState] = useState('pending');
+  const [passkeyState, setPasskeyState] = useState('pending');
   const [cameraOn, setCameraOn] = useState(false);
   const [faceFeedback, setFaceFeedback] = useState('');
   const [verificationResult, setVerificationResult] = useState(null);
@@ -60,24 +61,15 @@ export default function App() {
   const [driverName, setDriverName] = useState('');
   const [newVehicleId, setNewVehicleId] = useState('');
   const [licenceExpiry, setLicenceExpiry] = useState('');
-  const [slot, setSlot] = useState(1);
   const videoRef = useRef(null);
   const activeCameraRef = useRef(null);
   const selected = data.drivers.find(d => d.id === driverId) || null;
   const vehicle = selected ? data.vehicles.find(v => v.id === selected.vehicleId) : null;
   const device = devices.find(d => d.id === deviceId) || null;
-  const connected = Boolean(device?.online && device?.sensorReady);
+  const connected = Boolean(device?.online);
   const faceEnrolled = Boolean(user && selected && hasFace(user.id, selected.id));
   const facePassed = faceState === 'passed';
-  const fingerprintPassed = fpState === 'passed';
-  const canEvaluate = connected && !!selected && ['passed', 'failed'].includes(faceState) && ['passed', 'failed'].includes(fpState) && !!fingerprintJobId && !busy;
-  const selectableSlots = useMemo(() => {
-    const used = new Set(data.drivers.map(d => d.fingerprintSlot));
-    return Array.from({ length: 127 }, (_, i) => i + 1).filter(s => !used.has(s));
-  }, [data.drivers]);
-  useEffect(() => {
-    if (selectableSlots.length && !selectableSlots.includes(Number(slot))) setSlot(selectableSlots[0]);
-  }, [selectableSlots, slot]);
+  const canEvaluate = connected && !!selected && ['passed', 'failed'].includes(faceState) && ['passed', 'failed'].includes(passkeyState) && !busy;
 
   async function refresh() {
     const next = await api('/api/dashboard');
@@ -136,9 +128,9 @@ export default function App() {
     finally { setBusy(''); }
   }
   function resetEvidence() {
-    setFaceState('pending'); setFpState('pending'); setVerificationResult(null); setFaceFeedback(''); setProgress('');
+    setFaceState('pending'); setPasskeyState('pending'); setVerificationResult(null); setFaceFeedback(''); setProgress('');
     cameraStop();
-    setFingerprintJobId('');
+    setPasskeyProofId('');
   }
   function chooseDriver(id) { resetEvidence(); setDriverId(id); }
   async function createEsp32() {
@@ -176,47 +168,47 @@ export default function App() {
       setFaceState(result.matched ? 'passed' : 'failed');
       setFaceFeedback(`Distance ${result.distance} · required ≤ ${result.threshold}`);
       setVerificationResult(null);
-      if (!result.matched) { setError('FACE MISMATCH — This does not match the enrolled face. Complete the fingerprint check and evaluate for the 10-second red LED + buzzer.'); }
+      if (!result.matched) { setError('FACE MISMATCH — This does not match the enrolled face. Complete the phone passkey check and evaluate for the 10-second red LED + buzzer.'); }
       else setNotice(`Face matched the enrolled template for ${selected.name}.`);
     });
     setProgress(''); cameraStop();
     // Any camera or model error must be a failure, never a passing result.
     setFaceState(current => current === 'checking' ? 'failed' : current);
   }
-  async function saveFingerprint() {
+  async function savePasskey() {
     if (!selected) return setError('Choose a driver first.');
-    if (!connected) return setError('ESP32 is offline or the fingerprint sensor is missing. Check Wi-Fi, device setup, and sensor wiring.');
-    if (!window.confirm(`Enrol a consenting user's fingerprint in sensor slot ${selected.fingerprintSlot}? This overwrites that slot if it already contains a print.`)) return;
     await run(async () => {
-      setProgress('Place finger, remove when prompted, then place same finger again. Watch sensor LED.');
-      const job = await runFingerprint({ type: 'ENROLL', deviceId, driverId: selected.id, onProgress: setProgress });
-      if (!job.success) throw new Error(`Enrollment failed: ${job.reason || 'fingerprint sensor error'}`);
-      await refresh(); setFpState('pending'); setVerificationResult(null);
-      setNotice(`Fingerprint enrolled in the sensor's memory at slot ${selected.fingerprintSlot}.`);
+      setProgress('Confirm passkey creation on this phone.');
+      await enrollPhonePasskey(selected.id);
+      await refresh(); setPasskeyState('pending'); setVerificationResult(null);
+      setNotice('Phone passkey enrolled. Only its public key is saved on the server; no biometric data is collected.');
     });
     setProgress('');
   }
-  async function checkFingerprint() {
-    if (!selected) return setError('Choose a driver first.');
-    if (!connected) return setError('ESP32 is offline or the fingerprint sensor is missing. Check Wi-Fi, device setup, and sensor wiring.');
-    await run(async () => {
-      setFpState('checking'); setProgress('Place the enrolled finger on the sensor…');
-      const job = await runFingerprint({ type: 'VERIFY', deviceId, driverId: selected.id, onProgress: setProgress });
-      setFingerprintJobId(job.id);
-      setFpState(job.success ? 'passed' : 'failed'); setVerificationResult(null);
-      if (job.success) setNotice(`Fingerprint matched sensor slot ${selected.fingerprintSlot}.`);
-      else setError(`FINGERPRINT MISMATCH — ${job.reason || 'not enrolled person'}. Evaluate for red LED and buzzer.`);
-    });
-    setProgress(''); setFpState(current => current === 'checking' ? 'failed' : current);
+  async function checkPasskey() {
+    if (!selected) return setError('Choose a driver.');
+    setError(''); setNotice(''); setPasskeyState('checking'); setBusy('task'); setPasskeyProofId('');
+    setProgress('Use the registered phone passkey (fingerprint, face unlock or PIN).');
+    try {
+      const result = await verifyPhonePasskey(selected.id);
+      setPasskeyProofId(result.proofId);
+      setPasskeyState('passed'); setVerificationResult(null);
+      setNotice('Passkey verified by the server. Evaluate the gate within 90 seconds.');
+    } catch (err) {
+      setPasskeyProofId('');
+      setPasskeyState('failed'); setVerificationResult(null);
+      setError('Passkey not verified: ' + (err.message || 'cancelled or incorrect authenticator') + '. Evaluate for red LED + buzzer.');
+    } finally {
+      setProgress(''); setBusy('');
+    }
   }
-  async function removeFingerprint() {
-    if (!selected || !connected) return setError('Select a driver and connect ESP32 over Wi-Fi first.');
-    if (!window.confirm(`Delete fingerprint slot ${selected.fingerprintSlot} from the physical sensor?`)) return;
+  async function removePasskey() {
+    if (!selected) return setError('Choose a driver.');
+    if (!window.confirm('Remove this driver’s enrolled phone passkey from the website?')) return;
     await run(async () => {
-      const job = await runFingerprint({ type: 'DELETE', deviceId, driverId: selected.id, onProgress: setProgress });
-      if (!job.success) throw new Error(`Deletion failed: ${job.reason || 'sensor error'}`);
-      await refresh(); setFpState('pending'); setVerificationResult(null);
-    }, 'Fingerprint template deleted from the physical sensor.');
+      await del('/api/passkeys/' + encodeURIComponent(selected.id));
+      await refresh(); setPasskeyState('pending'); setPasskeyProofId(''); setVerificationResult(null);
+    }, 'Passkey removed from the server (it may remain visible in phone settings).');
   }
   async function evaluate() {
     if (!selected) return setError('Select a driver.');
@@ -224,7 +216,7 @@ export default function App() {
     await run(async () => {
       const response = await post('/api/access/check', {
         driverId: selected.id, vehicleId: selected.vehicleId,
-        faceMatched: facePassed, fingerprintJobId, deviceId
+        faceMatched: facePassed, passkeyProofId: passkeyState === 'passed' ? passkeyProofId : null, deviceId
       });
       setVerificationResult({ ...response.decision,
         hardwareInputA: response.event.hardwareInputA,
@@ -239,7 +231,7 @@ export default function App() {
         hardwareInputB: response.event.hardwareInputB,
         gateHigh: job.gateHigh });
       await refresh();
-      setFingerprintJobId(''); // One fingerprint scan authorizes one demo decision.
+      setPasskeyProofId(''); setPasskeyState('pending'); // Each verified passkey proof is single-use.
       setNotice(job.gateHigh ? '7408 OUTPUT = 1 · GREEN LED ON FOR 10 SECONDS' : '7408 OUTPUT = 0 · RED LED + BUZZER ON FOR 10 SECONDS');
     });
   }
