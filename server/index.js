@@ -142,7 +142,7 @@ app.post('/api/devices', auth, (req, res) => {
     return errors(res, 400, 'Maximum of three classroom devices per account.');
   const name = normalized(req.body?.name).slice(0, 60) || 'LOGIX ESP32';
   const key = newDeviceKey();
-  const device = { id: makeId(), ownerId: req.demoUser.id, name, keyHash: hashKey(key), lastSeenAt: null, sensorReady: false };
+  const device = { id: makeId(), ownerId: req.demoUser.id, name, keyHash: hashKey(key), lastSeenAt: null };
   db.devices.push(device); writeStore(db);
   res.status(201).json({ device: publicDevice(device), deviceKey: key });
 });
