@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api, post, patch, del } from './api.js';
 import { startCamera, stopCamera, enrollFace, verifyFace, hasFace, deleteFace } from './face.js';
-import { getDevices, registerDevice, waitForJob } from './device.js';
+import { bleSupported, bleConnected, connectBle, disconnectBle, sendBleDecision } from './device.js';
 import { enrollPhonePasskey, verifyPhonePasskey, passkeySupported } from './passkeys.js';
 
 const NAV = [
@@ -45,9 +45,8 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
-  const [devices, setDevices] = useState([]);
-  const [deviceId, setDeviceId] = useState('');
-  const [provision, setProvision] = useState(null);
+  const [bleStatus, setBleStatus] = useState(false);
+  const [bleName, setBleName] = useState('');
   const [passkeyProofId, setPasskeyProofId] = useState('');
   const [driverId, setDriverId] = useState('');
   const [faceState, setFaceState] = useState('pending');
@@ -65,8 +64,7 @@ export default function App() {
   const activeCameraRef = useRef(null);
   const selected = data.drivers.find(d => d.id === driverId) || null;
   const vehicle = selected ? data.vehicles.find(v => v.id === selected.vehicleId) : null;
-  const device = devices.find(d => d.id === deviceId) || null;
-  const connected = Boolean(device?.online);
+  const connected = bleStatus && bleConnected();
   const faceEnrolled = Boolean(user && selected && hasFace(user.id, selected.id));
   const facePassed = faceState === 'passed';
   const canEvaluate = connected && !!selected && ['passed', 'failed'].includes(faceState) && ['passed', 'failed'].includes(passkeyState) && !busy;
@@ -102,22 +100,6 @@ export default function App() {
     stopCamera(activeCameraRef.current); activeCameraRef.current = null; setCameraOn(false);
   }, [page]);
   useEffect(() => () => { stopCamera(activeCameraRef.current); }, []);
-  useEffect(() => {
-    if (!user) return;
-    let active = true;
-    async function poll() {
-      try {
-        const { devices: items } = await getDevices();
-        if (active) {
-          setDevices(items);
-          setDeviceId(old => items.some(d => d.id === old) ? old : items[0]?.id || '');
-        }
-      } catch { /* A temporary network outage is reflected on the next poll. */ }
-    }
-    void poll();
-    const ticker = setInterval(() => void poll(), 5000);
-    return () => { active = false; clearInterval(ticker); };
-  }, [user?.id]);
 
   async function run(fn, successMessage = '') {
     setError(''); setNotice(''); setBusy('task');
@@ -133,14 +115,21 @@ export default function App() {
     setPasskeyProofId('');
   }
   function chooseDriver(id) { resetEvidence(); setDriverId(id); }
-  async function createEsp32() {
-    await run(async () => {
-      const created = await registerDevice('LOGIX ESP32');
-      setProvision({ deviceId: created.device.id, deviceKey: created.deviceKey, serverUrl: window.location.origin });
-      const { devices: items } = await getDevices();
-      setDevices(items); setDeviceId(created.device.id);
-      setNotice('ESP32 registered. Copy its configuration below, upload firmware, and power it on.');
-    });
+  async function connectEsp32() {
+    setError(''); setNotice(''); setBusy('ble');
+    try {
+      // The Bluetooth chooser must start in this button click handler.
+      const result = await connectBle(setBleStatus);
+      setBleName(result.name);
+      setBleStatus(true);
+      setNotice('Connected to ESP32 through Bluetooth Low Energy.');
+    } catch (err) {
+      setError('BLE connection failed: ' + (err.message || 'Unknown Bluetooth error.'));
+    } finally { setBusy(''); }
+  }
+  function disconnectEsp32() {
+    disconnectBle(); setBleStatus(false); setBleName('');
+    setNotice('ESP32 BLE disconnected.');
   }
   async function cameraStart() {
     await run(async () => {
@@ -212,33 +201,51 @@ export default function App() {
   }
   async function evaluate() {
     if (!selected) return setError('Select a driver.');
-    if (!connected) return setError('ESP32 must be online to run the physical 7408 AND gate.');
+    if (!connected) return setError('Connect ESP32 over BLE first.');
     await run(async () => {
       const response = await post('/api/access/check', {
         driverId: selected.id, vehicleId: selected.vehicleId,
-        faceMatched: facePassed, passkeyProofId: passkeyState === 'passed' ? passkeyProofId : null, deviceId
+        faceMatched: facePassed,
+        passkeyProofId: passkeyState === 'passed' ? passkeyProofId : null
       });
+      // The one-use, server-verified passkey proof is consumed here.
+      setPasskeyProofId(''); setPasskeyState('pending');
       setVerificationResult({ ...response.decision,
-        hardwareInputA: response.event.hardwareInputA,
-        hardwareInputB: response.event.hardwareInputB,
-        gateHigh: null });
-      setProgress('ESP32 is testing the physical 7408 AND gate…');
-      const job = await waitForJob(response.job.id, 25000, setProgress);
+        hardwareInputA: response.command.a, hardwareInputB: response.command.b,
+        gateHigh: null, bleStatus: 'pending' });
+      setProgress('Sending verified decision bits to ESP32 over Bluetooth…');
+      let hardware;
+      try {
+        hardware = await sendBleDecision(response.command.a, response.command.b);
+      } catch (error) {
+        await post('/api/access/report', { eventId: response.event.id, status: 'N', gateHigh: null }).catch(() => {});
+        await refresh();
+        setProgress('');
+        throw error;
+      }
+      setProgress('ESP32 replied. Recording the BLE result…');
+      const { gateHigh, status } = hardware;
+      try {
+        await post('/api/access/report', { eventId: response.event.id, status, gateHigh });
+      } catch (error) {
+        setProgress('');
+        throw new Error('ESP32 replied, but the server log could not be updated: ' + error.message);
+      }
       setProgress('');
-      if (!job.success) throw new Error(`7408 hardware check failed: ${job.reason || 'unknown error'}`);
       setVerificationResult({ ...response.decision,
-        hardwareInputA: response.event.hardwareInputA,
-        hardwareInputB: response.event.hardwareInputB,
-        gateHigh: job.gateHigh });
+        hardwareInputA: response.command.a, hardwareInputB: response.command.b,
+        gateHigh, bleStatus: status });
       await refresh();
-      setPasskeyProofId(''); setPasskeyState('pending'); // Each verified passkey proof is single-use.
-      setNotice(job.gateHigh ? '7408 OUTPUT = 1 · GREEN LED ON FOR 10 SECONDS' : '7408 OUTPUT = 0 · RED LED + BUZZER ON FOR 10 SECONDS');
+      if (hardware.fault) throw new Error('The physical 7408 output disagrees with the expected logic. Check IC and GPIO27 wiring.');
+      setNotice(status === 'P' ? 'BLE RESULT 1: GREEN LED ON FOR 10 SECONDS'
+        : 'BLE RESULT 0: RED LED + BUZZER ON FOR 10 SECONDS');
     });
   }
   async function logout() {
     await run(async () => {
       cameraStop(); await post('/api/auth/logout', {});
-      setUser(null); setData({ vehicles: [], drivers: [], events: [] }); setDevices([]); setProvision(null); setPage('overview');
+      disconnectBle(); setBleStatus(false); setBleName('');
+      setUser(null); setData({ vehicles: [], drivers: [], events: [] }); setPage('overview');
     });
   }
   if (loading) return <div className="loading">Loading UNDERAGE DRIVING…</div>;
