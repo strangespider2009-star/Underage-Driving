@@ -1,100 +1,113 @@
-# Underage-Driving · ESP32 / fingerprint / physical 7408 wiring
+# Underage-Driving — ESP32 + physical 7408 AND gate (phone passkey edition)
 
-**Purpose: a desk-top low-voltage, LED-and-buzzer demonstration. Do NOT attach any of these connections to a car, ignition, starter, vehicle lock, engine, or road-going equipment.**
+**Desktop LED-and-buzzer educational demonstration only. Do not connect the outputs to any real vehicle, ignition, lock, steering, or motor.**
+
+**No external fingerprint sensor, HC-05, or optical reader is required.** Enrollment and verification of a *phone passkey* use the browser's WebAuthn prompt. The phone may request a fingerprint, face unlock, or screen-lock PIN: websites cannot require fingerprint-only verification or access biometric samples.
 
 ## Components
 
-- 1 × **ESP32-WROOM-32 DevKit** board, powered by a USB cable (ESP32-S3/C3 boards have different UART pin mapping; adapt if needed)
-- 1 × **R307/AS608 TTL UART fingerprint sensor** with pinout confirmed from its own datasheet
-- 1 × **SN7408, SN74LS08, or SN74HCT08** 14-pin DIP AND-gate IC, powered from regulated **5 V** (see variant below)
-- 1 × NPN transistor **2N2222** or **BC547** for isolating AND-gate output from the 3.3 V ESP32 input
-- 1 × NPN transistor **2N2222** or equivalent for switching an **active 5 V buzzer**
-- 1 × green LED, 1 × red LED, each with its own **330 Ω** series resistor
-- 1 × active 5 V buzzer of low current draw, compatible with the selected transistor, and a flyback diode if it is an inductive buzzer
-- Resistors: **4.7 kΩ** for AND output transistor base, **22 kΩ** from its collector to 3.3 V, **1 kΩ** for buzzer transistor base; **10 kΩ × 2** as AND input pull-downs
-- A breadboard, jumper wires, and a 100 nF ceramic decoupling capacitor across the 7408 VCC/GND pins
+- ESP32-WROOM-32 DevKit (USB data cable; 2.4 GHz Wi-Fi)
+- 1 × SN7408 / SN74LS08 / SN74HCT08, 14-pin DIP AND IC (5V TTL-compatible); **or** 74HC08 at 3.3V
+- 2 × 330Ω resistors, green LED, red LED
+- 2 × 10kΩ pull-down resistors, 100nF capacitor
+- For the 5V logic variant: 1 × BC547 or appropriate 2N2222 transistor Q1, 4.7kΩ resistor, 22kΩ resistor
+- For an active 5V buzzer: 1 × suitable NPN transistor Q2, 1kΩ base resistor, suitable flyback diode if buzzer is inductive
+- Breadboard, wires, and regulated 5V supply appropriate for the 7408 and buzzer
 
-## 1. ESP32 → fingerprint scanner
+## ESP32 firmware pins
 
-| Fingerprint module (check printed labels) | ESP32 DevKit | Notes |
-|---|---|---|
-| `VCC` / `+5V` | Regulated 5 V supply | Common R307 models require 4.2–6 V **power**; verify your exact sensor manual |
-| `GND` | GND | Must share a common ground with ESP32 |
-| `TX` | GPIO16 (`RX2`) **through safe level shifting if TX is 5 V** | Never feed unknown 5 V output directly to ESP32; measure or check module datasheet |
-| `RX` | GPIO17 (`TX2`) | ESP32 provides 3.3 V UART logic; confirm module supports it |
-
-A labelled R307 module commonly supports 3.3 V or 5 V MCU **logic**, while its **power** is frequently specified as 4.2–6 V. Some clones differ. If your R307 TX swings to 5 V, use a suitable UART level shifter (5 V → 3.3 V), or a divider designed for UART at 57600 baud. Do **not** assume the wire color indicates the signal.
-
-## 2. Classic SN7408 / SN74LS08 / SN74HCT08 AND gate at 5 V
-
-The IC notch/dot determines its orientation; count pins counterclockwise viewed from the top. **Do not wire before checking the IC's printed full part number.**
-
-| IC pin | Wire to | Purpose |
-|---|---|---|
-| **14** | Regulated **5 V** | 7408 supply |
-| **7** | **GND** | Shared ground |
-| **1** (`1A`) | ESP32 **GPIO25** + separate **10 kΩ** resistor to GND | Input A: face match **and other demo policy checks** |
-| **2** (`1B`) | ESP32 **GPIO26** + separate **10 kΩ** resistor to GND | Input B: fingerprint match |
-| **3** (`1Y`) | **4.7 kΩ** → base of 2N2222/BC547 **Q1** | Real physical gate output Y |
-| **4, 5, 9, 10, 12, 13** | GND | Tie unused gate inputs LOW; do not leave floating |
-| **6, 8, 11** | Not connected | Unused gate outputs |
-
-Place a **100 nF** capacitor close to pins 14 and 7. ESP32 outputs HIGH at **3.3 V**, which is accepted by typical **SN7408/SN74LS08/SN74HCT08** TTL-compatible inputs powered at 5 V. **SN74HC08 at 5 V is different**: it has CMOS thresholds and is *not* guaranteed to recognize 3.3 V as HIGH.
-
-### Q1 gate-output-to-ESP32 level-safe interface (important)
-
-- 7408 **pin 3** → **4.7 kΩ** resistor → **Q1 base**.
-- Q1 **emitter** → **GND**.
-- Q1 **collector** → ESP32 **GPIO27**.
-- **22 kΩ pull-up** between Q1 collector/GPIO27 and ESP32 **3.3 V** (not 5 V).
-- In `config.h`, set `#define AND_GATE_OUTPUT_INVERTED 1` (default).
-
-The Q1 transistor inverts the 7408 output. Gate output HIGH turns Q1 ON, pulling GPIO27 LOW; gate output LOW turns Q1 OFF, so the 22 kΩ pull-up makes GPIO27 HIGH. **The ESP32 never receives a 5 V gate output.**
-
-Check the exact **E-B-C pin arrangement** for your transistor manufacturer; 2N2222/PN2222/BC547 pinouts differ. Correct polarity and emitter are critical.
-
-### If the chip says exactly `74HC08` (without T)
-
-Instead of the 5 V circuit above, power the **74HC08 from 3.3 V** (pin 14), use the same shared GND, connect inputs pins 1 and 2 to GPIO25/26, and connect **pin 3 directly to GPIO27**. **Omit Q1 and the 4.7 kΩ/22 kΩ resistors** and set `#define AND_GATE_OUTPUT_INVERTED 0`. Refer to its specific datasheet to confirm 3.3 V operation. *Never* connect a 5 V HC08 output directly to an ESP32 pin.
-
-## 3. Green LED, red LED and active buzzer
-
-| Output | Wiring |
+| ESP32 DevKit pin | Purpose |
 |---|---|
-| Green LED | ESP32 **GPIO18** → **330 Ω** → **green LED anode (+)**; LED cathode (-) → GND |
-| Red LED | ESP32 **GPIO19** → **330 Ω** → **red LED anode (+)**; LED cathode (-) → GND |
-| Active 5 V buzzer | 5 V → buzzer **+**; buzzer **-** → **Q2 collector**; Q2 emitter → GND; ESP32 **GPIO23** → **1 kΩ** → Q2 base |
+| GPIO25 | Input A to 7408 pin 1: face matched **and** approval policy |
+| GPIO26 | Input B to 7408 pin 2: server-verified phone passkey assertion |
+| GPIO27 | Read the physical 7408 output via Q1 inverter (or direct 3.3V 74HC08) |
+| GPIO18 | Green LED |
+| GPIO19 | Red LED |
+| GPIO23 | Active buzzer transistor control |
+| GND | Ground common to all components |
+| USB | ESP32 power/programming |
 
-Use an **active buzzer** that sounds when DC power is applied (not a passive piezo sounder). For magnetic/inductive buzzer types, put an appropriate flyback diode across its terminals (**cathode to +5 V**). Do not drive a buzzer or another high-current load directly from an ESP32 pin. If all modules combined exceed the USB/board regulator supply capacity, provide a separately regulated 5 V supply and connect grounds; **do not apply external 5 V to the 3V3 pin**.
+There is **no wiring at GPIO16 or GPIO17**; the old R307 sensor has been removed.
 
-## 4. Required truth table and timer
+## 1. Identifying your 7408
 
-| Face + policy (A) | Fingerprint (B) | Physical 7408 Y=A AND B | ESP32 indication |
+Read the **exact full part number** printed on the chip and its datasheet. Find the notch/dot marking before counting pins counterclockwise viewed from above.
+
+For a 14-pin 7408-family AND-gate DIP:
+
+| IC pin | Connection |
+|---|---|
+| **14** | Regulated **5V** for classic SN7408, SN74LS08, SN74HCT08; **3.3V** only for the 74HC08 variant described below |
+| **7** | GND |
+| **1** | ESP32 GPIO25 plus separate 10kΩ pull-down to GND |
+| **2** | ESP32 GPIO26 plus separate 10kΩ pull-down to GND |
+| **3** | Gate output Y (do not connect directly to ESP32 if the chip runs at 5V) |
+| **4, 5, 9, 10, 12, 13** | Tie unused gate **inputs** to GND |
+| **6, 8, 11** | Leave unused gate **outputs** unconnected |
+
+Place a 100nF decoupling capacitor very close to the IC's pins 14 and 7.
+
+### Option A — SN7408 / 74LS08 / 74HCT08 at 5V (default sketch configuration)
+
+3.3V HIGH from ESP32 outputs is accepted by these TTL-compatible chip inputs. Protect GPIO27 from the 5V gate output using an NPN inverter:
+
+- 7408 pin 3 → **4.7kΩ** → Q1 transistor **base**.
+- Q1 **emitter** → GND.
+- Q1 **collector** → ESP32 **GPIO27**.
+- Add **22kΩ** resistor from Q1 collector/GPIO27 to ESP32 **3V3** (not 5V).
+- Keep **AND_GATE_OUTPUT_INVERTED 1** in firmware/config.h.
+
+When Y is 1, Q1 pulls GPIO27 low; firmware reverses that reading. **Never feed 5V into GPIO27 or another ESP32 GPIO.**
+
+### Option B — exact SN74HC08 / 74HC08 at 3.3V
+
+- IC pin 14 → ESP32 3V3; pin 7 → GND.
+- Inputs pins 1 and 2 → GPIO25 and GPIO26 with pull-downs.
+- IC pin 3 → GPIO27 **directly**; omit Q1, 4.7kΩ, and 22kΩ.
+- Set **AND_GATE_OUTPUT_INVERTED 0** in config.h.
+
+Do not operate the 74HC08 at 5V and assume ESP32 3.3V HIGH will be recognized; HC thresholds differ from TTL/HCT thresholds. Do not mix the two interface options.
+
+## 2. LEDs and buzzer
+
+| Component | Wiring |
+|---|---|
+| Green LED | GPIO18 → 330Ω → LED anode (+); cathode (−) → GND |
+| Red LED | GPIO19 → 330Ω → LED anode (+); cathode (−) → GND |
+| Active 5V buzzer | Regulated 5V → buzzer positive; buzzer negative → Q2 collector; Q2 emitter → GND |
+| Buzzer base drive | GPIO23 → 1kΩ → Q2 base |
+
+Ensure Q1 and Q2 use the correct manufacturer's E-B-C pinout; BC547, 2N2222 and PN2222 lead arrangements can differ.
+
+An active buzzer sounds when given DC power. For an inductive/magnetic buzzer, follow its datasheet's flyback diode instructions (diode cathode towards +5V). Avoid powering high-current peripherals directly from ESP32 GPIO or the 3V3 regulator. Provide suitable regulated power and shared grounds.
+
+## 3. Truth table
+
+| A: face + demo policy | B: phone passkey verified | Y = A AND B | Output for 10 seconds |
 |---:|---:|---:|---|
-| 0 | 0 | 0 | **Red + pulsed buzzer for 10 seconds** |
-| 0 | 1 | 0 | **Red + pulsed buzzer for 10 seconds** |
-| 1 | 0 | 0 | **Red + pulsed buzzer for 10 seconds** |
-| 1 | 1 | 1 | **Green for 10 seconds**, buzzer silent |
+| 0 | 0 | 0 | Red LED + pulsed buzzer |
+| 0 | 1 | 0 | Red LED + pulsed buzzer |
+| 1 | 0 | 0 | Red LED + pulsed buzzer |
+| 1 | 1 | 1 | Green LED, buzzer silent |
 
-When the 10 seconds end, **both 7408 inputs, both LEDs and the buzzer go LOW/OFF**. GPIO25 and GPIO26 have external pull-down resistors to keep both inputs LOW during MCU startup. If measured 7408 output does not agree with the truth table, the firmware fails closed to red+buzzer and reports `AND_GATE_MISMATCH` to the website.
+The ESP32 drives both inputs, reads the physical gate output via GPIO27, and verifies the truth table. A gate mismatch triggers red LED and buzzer. A separate FreeRTOS task shuts everything OFF after approximately 10 seconds even if HTTP polling blocks. The project doesn't use this result to operate a vehicle.
 
-**Caveat:** On the website `A` is the face match AND owner approval, associated vehicle and expiry-date policy. This ensures the LED never turns green for a person whose face+fingerprint match but who lacks the additional demonstration approval.
+## 4. Phone passkey setup
 
-## 5. Power-on and acceptance checklist
+1. Deploy the same HTTPS origin you'll use for enrollment and verification; passkeys are bound to this site's domain.
+2. Sign in to the website, add an approved test driver and demo vehicle.
+3. Register the ESP32 on **Setup guide**. Put the device ID, key, Wi-Fi and new Render HTTPS URL into firmware/config.h.
+4. Install **ESP32 by Espressif Systems** and **ArduinoJson v7**; compile firmware/ESP32_LOGIX/ESP32_LOGIX.ino (the fingerprint sensor library is no longer required).
+5. After ESP32 shows ONLINE, open **Enrollment** on the **phone's browser**, enroll the face in that browser, and tap **Enrol phone passkey**. The phone handles device authentication.
+6. On **Verification**, verify face and then phone passkey. Press **Evaluate physical 7408 gate**.
+7. Verify the LED result and 10-second timeout. The site does not receive your phone's fingerprint image, biometric template or PIN.
 
-1. With power disconnected, review all 5 V and 3.3 V connections, IC orientation, transistor pinouts, and LED polarities.
-2. Use USB to power the ESP32 and an adequately rated 5 V rail for the 7408, fingerprint sensor, and active buzzer.
-3. Upload the ESP32 sketch. Open Serial Monitor at **115200 baud**; expect `R307/AS608 sensor: READY`.
-4. Register the ESP32 on the website's **Setup guide**; put the device ID and key into `config.h` (do not publish that file).
-5. Open the site's **Enrollment** panel, capture face samples in the browser, and enrol the same person's fingerprint twice on the physical R307.
-6. On **Verification**, try matching face + matching fingerprint: expect A=1, B=1, Y=1, green 10 s.
-7. Try a different fingerprint with a matching face: A=1, B=0, Y=0, red+buzzer 10 s.
-8. Try a different face with matching fingerprint: A=0, B=1, Y=0, red+buzzer 10 s.
-9. Test timeout/unplugged sensor: no approval; website reports sensor offline/failure. Disconnecting Wi-Fi must not keep an LED active.
+Browser native passkey prompts work best in current Chrome/Safari over HTTPS. A basic Android WebView wrapper may need native passkey integration. Some phones use face unlock or PIN instead of fingerprint; this is expected and cannot be overridden by the website.
 
-### Sources for component variant checks
+**Important:** Render Free's temporary filesystem may erase passkey registrations, drivers, and device credentials after a restart. Use durable storage before depending on repeat demos.
 
-- TI SN7408 family data: https://www.ti.com/lit/ds/symlink/sn7408.pdf (confirm part marking)
-- Nexperia 74HC08/HCT08: https://www.nexperia.com/products/analog-logic-ics/logic/gates/and-gates/serie/74hc08-74hct08/
-- R307 reference module manual: https://manuals.plus/m/2f85c3d14c4a4d4057eea04b2b3fb71466869f6a2a0cd1722467b396ee726e6f
-- ESP32 hardware specification: https://documentation.espressif.com/esp32_datasheet_en.html
+### Hardware references
+
+- TI SN7408 datasheet: https://www.ti.com/lit/ds/symlink/sn7408.pdf
+- Nexperia 74HC08/74HCT08: https://www.nexperia.com/products/analog-logic-ics/logic/gates/and-gates/serie/74hc08-74hct08/
+- Espressif ESP32 hardware: https://documentation.espressif.com/esp32_datasheet_en.html
