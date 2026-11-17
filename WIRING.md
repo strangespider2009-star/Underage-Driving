@@ -1,12 +1,12 @@
-# Underage-Driving — ESP32 + physical 7408 AND gate (phone passkey edition)
+# Underage-Driving — ESP32 BLE + 7408 AND gate + phone passkey
 
 **Desktop LED-and-buzzer educational demonstration only. Do not connect the outputs to any real vehicle, ignition, lock, steering, or motor.**
 
-**No external fingerprint sensor, HC-05, or optical reader is required.** Enrollment and verification of a *phone passkey* use the browser's WebAuthn prompt. The phone may request a fingerprint, face unlock, or screen-lock PIN: websites cannot require fingerprint-only verification or access biometric samples.
+**No Wi-Fi, HC-05, R307, AS608, or external fingerprint sensor is required.** Enrollment and verification of a *phone passkey* use the browser's WebAuthn prompt. The phone may request a fingerprint, face unlock, or screen-lock PIN: websites cannot require fingerprint-only verification or access biometric samples.
 
 ## Components
 
-- ESP32-WROOM-32 DevKit (USB data cable; 2.4 GHz Wi-Fi)
+- ESP32-WROOM-32 DevKit (USB data cable; built-in Bluetooth Low Energy)
 - 1 × SN7408 / SN74LS08 / SN74HCT08, 14-pin DIP AND IC (5V TTL-compatible); **or** 74HC08 at 3.3V
 - 2 × 330Ω resistors, green LED, red LED
 - 2 × 10kΩ pull-down resistors, 100nF capacitor
@@ -92,19 +92,23 @@ An active buzzer sounds when given DC power. For an inductive/magnetic buzzer, f
 
 The ESP32 drives both inputs, reads the physical gate output via GPIO27, and verifies the truth table. A gate mismatch triggers red LED and buzzer. A separate FreeRTOS task shuts everything OFF after approximately 10 seconds even if HTTP polling blocks. The project doesn't use this result to operate a vehicle.
 
-## 4. Phone passkey setup
+## 4. Bluetooth Low Energy (BLE) setup
 
-1. Deploy the same HTTPS origin you'll use for enrollment and verification; passkeys are bound to this site's domain.
-2. Sign in to the website, add an approved test driver and demo vehicle.
-3. Register the ESP32 on **Setup guide**. Put the device ID, key, Wi-Fi and new Render HTTPS URL into firmware/config.h.
-4. Install **ESP32 by Espressif Systems** and **ArduinoJson v7**; compile firmware/ESP32_LOGIX/ESP32_LOGIX.ino (the fingerprint sensor library is no longer required).
-5. After ESP32 shows ONLINE, open **Enrollment** on the **phone's browser**, enroll the face in that browser, and tap **Enrol phone passkey**. The phone handles device authentication.
-6. On **Verification**, verify face and then phone passkey. Press **Evaluate physical 7408 gate**.
-7. Verify the LED result and 10-second timeout. The site does not receive your phone's fingerprint image, biometric template or PIN.
+1. Install **esp32 by Espressif Systems 3.x** in Arduino IDE. The BLE headers are supplied by the ESP32 board package; no Wi-Fi, ArduinoJson, or fingerprint library is necessary.
+2. Open **firmware/ESP32_LOGIX/ESP32_LOGIX.ino**, upload to the ESP32-WROOM-32 board, and check the Serial Monitor at **115200**. It should say **LOGIX-BLE advertising**.
+3. Open the **deployed Render HTTPS website in Android Chrome**, with Bluetooth enabled on your phone. Tap **Connect ESP32 via BLE** and select **LOGIX-BLE**.
+4. Render still handles the user account and **signed phone passkey challenge**. The phone sends the resulting A/B demo bits directly to ESP32 over BLE. ESP32 does not need internet.
+5. On the website, enroll a consenting person's face using the phone camera and enroll their phone passkey. Then verify face, verify passkey, and select **Evaluate physical 7408 gate**.
+6. The physical gate result comes back over BLE as a short notification. Check all four truth-table combinations and ensure the LED/buzzer duration is 10 seconds.
+7. If the BLE connection drops, tap **Connect ESP32 via BLE** again; the firmware resumes advertising on disconnect.
 
-Browser native passkey prompts work best in current Chrome/Safari over HTTPS. A basic Android WebView wrapper may need native passkey integration. Some phones use face unlock or PIN instead of fingerprint; this is expected and cannot be overridden by the website.
+**GATT transport**: device name `LOGIX-BLE`, Nordic UART Service `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`, RX write `6E400002...`, TX notifications `6E400003...`. The phone sends a nine-byte decision packet and checks a matching nonce in the ESP32's nine-byte output notification.
 
-**Important:** Render Free's temporary filesystem may erase passkey registrations, drivers, and device credentials after a restart. Use durable storage before depending on repeat demos.
+**Browser support:** Web Bluetooth is available in supported Android Chrome over HTTPS; basic Android WebView wrappers and Safari on iPhone do not expose equivalent Web Bluetooth APIs. The phone requires an internet connection to contact Render for its passkey verification; the ESP32 does **not**.
+
+**Security limitation:** Web Bluetooth packets are not authenticated as proof of identity by this ESP32 sketch. Nearby BLE clients may send commands, and the server logs browser-reported hardware feedback. **Never use these output signals for a vehicle, ignition, motor or lock.**
+
+**Data warning:** Render Free's ephemeral JSON database may lose account/passkey data across restarts. Use persistent storage if demos must survive redeployments.
 
 ### Hardware references
 
